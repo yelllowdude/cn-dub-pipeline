@@ -1,0 +1,218 @@
+<meta charset="UTF-8">
+<title>Chinese upload & schedule — staff handoff</title>
+<style>
+  :root {
+    --paper: #E9ECEF;
+    --surface: #FFFFFF;
+    --surface-2: #F3F5F7;
+    --ink: #15171B;
+    --ink-2: #3D424B;
+    --muted: #737C89;
+    --line: #D6DBE1;
+    --line-2: #E4E8ED;
+    --accent: #FB7299;
+    --accent-ink: #B23A5E;
+    --accent-wash: #FDE9EF;
+    --gate: #C9821A;
+    --gate-wash: #F8ECD6;
+    --done: #2F8F63;
+    --done-wash: #DFF0E7;
+    --stop: #D8412F;
+    --stop-wash: #FBE6E2;
+    --radius: 12px;
+    --font-display: "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+    --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    --font-mono: "SF Mono", ui-monospace, "JetBrains Mono", "Cascadia Code", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #101216; --surface: #191C22; --surface-2: #21252C;
+      --ink: #EAECEF; --ink-2: #B4BAC4; --muted: #7C8593;
+      --line: #2C313A; --line-2: #232830;
+      --accent: #FB7299; --accent-ink: #FF9DB9; --accent-wash: #331A24;
+      --gate: #E0A643; --gate-wash: #322915;
+      --done: #4FB484; --done-wash: #16281F;
+      --stop: #F06A57; --stop-wash: #34201C;
+    }
+  }
+  :root[data-theme="light"] {
+    --paper: #E9ECEF; --surface: #FFFFFF; --surface-2: #F3F5F7; --ink: #15171B; --ink-2: #3D424B;
+    --muted: #737C89; --line: #D6DBE1; --line-2: #E4E8ED; --accent: #FB7299; --accent-ink: #B23A5E;
+    --accent-wash: #FDE9EF; --gate: #C9821A; --gate-wash: #F8ECD6; --done: #2F8F63; --done-wash: #DFF0E7;
+    --stop: #D8412F; --stop-wash: #FBE6E2;
+  }
+  :root[data-theme="dark"] {
+    --paper: #101216; --surface: #191C22; --surface-2: #21252C; --ink: #EAECEF; --ink-2: #B4BAC4;
+    --muted: #7C8593; --line: #2C313A; --line-2: #232830; --accent: #FB7299; --accent-ink: #FF9DB9;
+    --accent-wash: #331A24; --gate: #E0A643; --gate-wash: #322915; --done: #4FB484; --done-wash: #16281F;
+    --stop: #F06A57; --stop-wash: #34201C;
+  }
+
+  * { box-sizing: border-box; }
+  body { margin: 0; }
+  .wrap {
+    font-family: var(--font-body);
+    background: var(--paper);
+    color: var(--ink);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    padding: clamp(1.4rem, 4vw, 3.2rem) clamp(1rem, 4vw, 1.5rem) 4rem;
+  }
+  .col { max-width: 660px; margin: 0 auto; }
+
+  .eyebrow {
+    font-size: .72rem; letter-spacing: .16em; text-transform: uppercase;
+    color: var(--accent-ink); font-weight: 600; margin: 0 0 .8rem;
+  }
+  h1 {
+    font-family: var(--font-display);
+    font-size: clamp(1.6rem, 4.4vw, 2.3rem); line-height: 1.12; letter-spacing: -.01em;
+    font-weight: 700; margin: 0 0 .7rem; text-wrap: balance;
+  }
+  .thesis {
+    font-size: 1.04rem; color: var(--ink-2); max-width: 56ch; margin: 0 0 1.6rem;
+  }
+  .thesis b { color: var(--ink); font-weight: 600; }
+
+  .where {
+    display: flex; gap: .7rem; align-items: flex-start;
+    background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: .9rem 1.1rem; margin-bottom: 2.2rem; font-size: .92rem; color: var(--ink-2);
+  }
+  .where b { color: var(--ink); }
+  .where code { font-family: var(--font-mono); font-size: .84em; background: var(--surface-2); padding: .05rem .4rem; border-radius: 5px; color: var(--ink); }
+
+  section { margin-top: 2.4rem; }
+  h2 { font-family: var(--font-display); font-size: 1.15rem; letter-spacing: -.005em; font-weight: 700; margin: 0 0 1rem; }
+
+  .job {
+    display: flex; gap: 1rem;
+    background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 1.3rem 1.4rem;
+  }
+  .job + .job { margin-top: .9rem; }
+  .job-n {
+    flex: none; width: 2.1rem; height: 2.1rem; border-radius: 50%;
+    background: var(--gate-wash); color: var(--gate); border: 1.5px solid var(--gate);
+    font-family: var(--font-display); font-weight: 700; font-size: .95rem;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .job-body { flex: 1; min-width: 0; }
+  .job-title { font-family: var(--font-display); font-weight: 700; font-size: 1.02rem; margin: 0 0 .5rem; color: var(--ink); }
+  .job ol, .job ul { margin: 0; padding-left: 1.15rem; }
+  .job li { font-size: .9rem; color: var(--ink-2); margin: .38rem 0; }
+  .job li::marker { color: var(--accent-ink); font-weight: 600; }
+  .job code { font-family: var(--font-mono); font-size: .82em; background: var(--surface-2); padding: .05rem .4rem; border-radius: 5px; color: var(--ink); }
+  .cn { color: var(--accent-ink); font-weight: 600; }
+
+  .callout { border-left: 3px solid var(--gate); background: var(--gate-wash); padding: .7rem .95rem; border-radius: 0 8px 8px 0; font-size: .87rem; margin: .7rem 0 0; color: var(--ink-2); }
+  .callout.watch { border-left-color: var(--stop); background: var(--stop-wash); }
+  .callout b { color: var(--ink); }
+
+  .locked {
+    list-style: none; margin: 0; padding: 0; display: grid; gap: .5rem;
+  }
+  .locked li {
+    display: flex; gap: .65rem; align-items: flex-start;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 9px;
+    padding: .7rem .9rem; font-size: .87rem; color: var(--ink-2);
+  }
+  .locked .tick {
+    flex: none; width: 1.15rem; height: 1.15rem; margin-top: .1rem; border-radius: 5px;
+    background: var(--done-wash); color: var(--done); border: 1.5px solid var(--done);
+    font-size: .7rem; font-weight: 700; display: flex; align-items: center; justify-content: center;
+  }
+  .locked b { color: var(--ink); }
+
+  .example-box {
+    border: 1px dashed var(--line); border-radius: 9px; padding: .8rem 1rem;
+    background: var(--surface-2); font-family: var(--font-mono); font-size: .82rem;
+    color: var(--ink-2); line-height: 1.7; margin-top: .5rem; overflow-x: auto;
+  }
+  .example-box .cn-line { color: var(--ink); }
+  .example-box .en-line { color: var(--muted); }
+
+  .escalate {
+    background: var(--stop-wash); border: 1px solid var(--stop); border-radius: var(--radius);
+    padding: 1.1rem 1.3rem; margin-top: 2.4rem;
+  }
+  .escalate h2 { color: var(--ink); margin-bottom: .6rem; }
+  .escalate ul { margin: 0; padding-left: 1.15rem; }
+  .escalate li { font-size: .9rem; color: var(--ink-2); margin: .35rem 0; }
+
+  .foot { margin-top: 2.6rem; padding-top: 1rem; border-top: 1px solid var(--line); color: var(--muted); font-size: .8rem; }
+</style>
+
+<div class="wrap">
+<div class="col">
+
+  <p class="eyebrow">Yellow Dude · Chinese localization · staff handoff</p>
+  <h1>Upload &amp; schedule the Chinese versions</h1>
+  <p class="thesis">Claude builds both Bilibili versions from one command — titles, subs, dub, thumbnail, description, all done. <b>Two things are left, and they're both yours.</b> This page tells you exactly what to check for each.</p>
+
+  <div class="where">
+    <span>📍</span>
+    <span><b>Where to find your work:</b> Notion → Chinese database → <b>"Whose turn"</b> board. Any card sitting under <code>Reviewer: review draft</code> is ready for you — nothing there needs a person before you touch it.</span>
+  </div>
+
+  <section>
+    <h2>Your two jobs</h2>
+
+    <div class="job">
+      <span class="job-n">1</span>
+      <div class="job-body">
+        <p class="job-title">Upload both drafts to Bilibili</p>
+        <ol>
+          <li>Open the row, open its <code>Drive folder</code> link → everything's in <code>/CN/</code>.</li>
+          <li>Pull <code>{id}_ensub.mp4</code> (英配中字) and <code>{id}_cndub.mp4</code> (中配), plus the cover image.</li>
+          <li>Titles are already written for you — copy <span class="cn">V1</span> from <code># CN title</code> on the page straight into the 英配中字 upload, and <span class="cn">V2</span> straight into the 中配 upload. Don't retype or reformat them.</li>
+          <li>Paste <code># CN description</code> exactly as written. Don't shorten it, don't move anything — the sponsor link's position is deliberate (see "already decided" below).</li>
+          <li>If the page has a <code># CN ad disclosure</code> section, follow it — see the watch-for box.</li>
+          <li>Submit both as drafts.</li>
+        </ol>
+      </div>
+    </div>
+
+    <div class="job">
+      <span class="job-n">2</span>
+      <div class="job-body">
+        <p class="job-title">Schedule both</p>
+        <ol>
+          <li>Set the same publish time on Bilibili's built-in scheduler for both drafts.</li>
+          <li>That's it. Claude reads the BV link and scheduled date back into Notion on its own afterward — you don't paste anything back.</li>
+        </ol>
+      </div>
+    </div>
+
+    <p class="callout watch"><b>Watch for: <code># CN ad disclosure</code>.</b> Only appears when a video has a sponsor. It names the exact boxes to tick on Bilibili's ad-declaration step — usually all three: <b>内容</b>, <b>口播</b>, <b>简介</b>. If the row has one, tick what it says, no more and no less.</p>
+  </section>
+
+  <section>
+    <h2>Already decided — don't second-guess these</h2>
+    <ul class="locked">
+      <li><span class="tick">✓</span><span><b>Title format.</b> 英配中字 gets the Chinese title <i>and</i> the English title in brackets; 中配 is Chinese-only. Both already end in a 【 】-bracketed tag so they read correctly as two distinct uploads, not a re-upload of each other.
+        <div class="example-box">
+          <div class="cn-line">V1 · 你的饮食,可能错了一辈子（You've been eating wrong your whole life）【英配中字】</div>
+          <div class="en-line">V2 · 你的饮食,可能错了一辈子 【中配】</div>
+        </div>
+      </span></li>
+      <li><span class="tick">✓</span><span><b>Where the sponsor link sits.</b> Always in the middle of the description, after the main summary paragraph — never the first line. A description that opens with a promo link reads as spam, so this is fixed on purpose.</span></li>
+      <li><span class="tick">✓</span><span><b>Whether a video needs ad disclosure.</b> Already decided by the <code>Contains ads?</code> checkbox — if it's ticked, the disclosure section is already written for you.</span></li>
+    </ul>
+  </section>
+
+  <div class="escalate">
+    <h2>If something's off, flag it — don't fix it yourself</h2>
+    <ul>
+      <li>A file is missing from <code>/CN/</code>, or a video's length looks wrong next to the source.</li>
+      <li><code>Contains ads?</code> is ticked but there's no <code># CN ad disclosure</code> section (or vice versa).</li>
+      <li>The title or description reads oddly, has a mistranslation, or a term looks inconsistent with past videos.</li>
+      <li>Anything about a row you're just not sure about.</li>
+    </ul>
+    <p style="margin: .8rem 0 0; font-size: .9rem; color: var(--ink-2);">Message Wayne rather than editing around it — most of these trace back to something upstream that's worth fixing once, not per-video.</p>
+  </div>
+
+  <p class="foot">Covers Chinese/Bilibili only for now. Other languages (Spanish, Japanese, German) aren't on this pipeline yet — you'll hear separately when that changes.</p>
+
+</div>
+</div>

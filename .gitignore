@@ -1,0 +1,16 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.env
+config.json
+runs/
+*.mp4
+*.wav
+*.mp3
+*.png
+*.jpg
+*.jpeg
+.DS_Store
+*.pid
+*.log
