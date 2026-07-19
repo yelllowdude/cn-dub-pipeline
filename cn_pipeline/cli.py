@@ -18,7 +18,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from cn_pipeline import align, dub, paths, render, subtitles, thumbnail
+from cn_pipeline import align, dub, frameio, paths, render, screentext, subtitles, thumbnail
 from cn_pipeline.config import ConfigError, get_config
 
 
@@ -26,16 +26,52 @@ def _scratch(project_id: str) -> Path:
     return paths.run_scratch_dir(project_id)
 
 
+def _stage_gate(args, outputs: list[Path], inputs: list[Path] = ()) -> bool:
+    """SKIP_OK semantics per cn_workflow.html section 04: a done stage skips,
+    only --force redoes it. "Done" is make-style -- all outputs exist and none
+    is older than any existing input -- so forcing one stage automatically
+    un-skips every downstream stage that consumes its output (their inputs
+    become newer than their outputs). Returns True if the stage should run."""
+    if getattr(args, "force", False):
+        return True
+    if any(not o.exists() for o in outputs):
+        return True
+    oldest_output = min(o.stat().st_mtime for o in outputs)
+    newest_input = max((i.stat().st_mtime for i in inputs if i.exists()), default=None)
+    if newest_input is not None and newest_input > oldest_output:
+        return True
+    print(f"SKIP_OK: {', '.join(o.name for o in outputs)} up to date -- use --force to redo")
+    return False
+
+
 def cmd_preflight(args):
     cfg = get_config()  # raises ConfigError loudly if anything's missing
     project_dir = paths.resolve_project_dir(args.project_id)
     master = paths.find_master_video(project_dir)
     me_wav = paths.me_wav_path(project_dir)
+    out = paths.deliverable_paths(project_dir)
     print(f"project dir: {project_dir}")
     print(f"master video: {master}")
     print(f"me.wav present: {me_wav.exists()} ({me_wav if me_wav.exists() else 'not found, dub ships without a background bed'})")
     print(f"ffmpeg: {cfg.ffmpeg_path}")
-    print("Pre-flight OK. Proceed to translation (live judgment -- see SKILL.md), then `subtitles ingest-translation`.")
+
+    en_srt = out["en_srt"]
+    print(f"en.srt present: {en_srt.exists()} "
+          f"({en_srt if en_srt.exists() else 'not found -- transcribe stage will generate it, not a stop condition'})")
+
+    done = [k for k, p in out.items() if p.exists()]
+    if done:
+        print(f"existing /CN/ deliverables (stages will SKIP_OK unless --force): {', '.join(sorted(done))}")
+
+    print()
+    print("Pre-flight OK (mechanical checks). Stage 1 items that are NOT checkable "
+          "from here and stay owned by the skill run (see cn_workflow.html Stage 1):")
+    print("  - winning title present in the source Notion row (missing -> fall back to "
+          "live published title, tick 'Title provisional?', print it loud)")
+    print("  - thumbnail source image located (text-free preferred; baked-text ok)")
+    print("  - sponsor detection: after transcribe, scan the transcript + source row's "
+          "sponsor field; verdict drives 'Contains ads?' and the ad-disclosure section")
+    print("Proceed to transcription, then translation (live judgment -- see SKILL.md).")
 
 
 def cmd_extract_audio(args):
@@ -43,6 +79,8 @@ def cmd_extract_audio(args):
     master = paths.find_master_video(project_dir)
     scratch = _scratch(args.project_id)
     out = scratch / "audio_16k.wav"
+    if not _stage_gate(args, [out], [master]):
+        return
     align.extract_audio_16k(master, out)
     print(f"wrote {out}")
 
@@ -53,6 +91,8 @@ def cmd_transcribe(args):
     if not audio.exists():
         sys.exit(f"{audio} not found -- run `align extract-audio` first")
     out_srt = scratch / "whisper_raw.srt"
+    if not _stage_gate(args, [out_srt], [audio]):
+        return
     align.transcribe_to_srt(audio, out_srt)
     print(f"wrote {out_srt}")
 
@@ -62,6 +102,8 @@ def cmd_split_cues(args):
     raw_srt = scratch / "whisper_raw.srt"
     if not raw_srt.exists():
         sys.exit(f"{raw_srt} not found -- run `align transcribe` first")
+    if not _stage_gate(args, [scratch / "segments.json"], [raw_srt]):
+        return
     segs = subtitles.split_cues(raw_srt)
     subtitles.save_segments(segs, scratch / "segments.json")
     print(f"wrote {len(segs)} cues to {scratch / 'segments.json'}")
@@ -84,6 +126,9 @@ def cmd_build_srt(args):
     scratch = _scratch(args.project_id)
     project_dir = paths.resolve_project_dir(args.project_id)
     out = paths.deliverable_paths(project_dir)
+    outputs = [scratch / "bilingual_ensub.srt", out["en_srt"], out["zh_srt"]]
+    if not _stage_gate(args, outputs, [scratch / "segments.json", scratch / "zh.json"]):
+        return
     segs = subtitles.load_segments(scratch / "segments.json")
     zh = json.loads((scratch / "zh.json").read_text(encoding="utf-8"))
     subtitles.build_bilingual_srt(segs, zh, scratch / "bilingual_ensub.srt")
@@ -91,11 +136,7 @@ def cmd_build_srt(args):
     print(f"wrote {scratch / 'bilingual_ensub.srt'}, {out['en_srt']}, {out['zh_srt']}")
 
 
-def cmd_dub_generate(args):
-    scratch = _scratch(args.project_id)
-    segs = subtitles.load_segments(scratch / "segments.json")
-    zh = json.loads((scratch / "zh.json").read_text(encoding="utf-8"))
-    log = dub.generate(segs, zh, scratch)
+def _print_capped_status(log: dict):
     capped = log["capped_chunks"]
     if capped:
         print(f"{len(capped)} chunk(s) hit the tempo cap: {capped} -- run `dub fix` next")
@@ -103,8 +144,23 @@ def cmd_dub_generate(args):
         print("no chunks capped -- skip `dub fix`, go straight to `dub finalize`")
 
 
+def cmd_dub_generate(args):
+    scratch = _scratch(args.project_id)
+    gen_log_path = scratch / "generate_log.json"
+    if not _stage_gate(args, [gen_log_path], [scratch / "segments.json", scratch / "zh.json"]):
+        # the orchestrator still needs the capped verdict to pick the next step
+        _print_capped_status(json.loads(gen_log_path.read_text()))
+        return
+    segs = subtitles.load_segments(scratch / "segments.json")
+    zh = json.loads((scratch / "zh.json").read_text(encoding="utf-8"))
+    log = dub.generate(segs, zh, scratch)
+    _print_capped_status(log)
+
+
 def cmd_dub_fix(args):
     scratch = _scratch(args.project_id)
+    if not _stage_gate(args, [scratch / "fix_log.json"], [scratch / "generate_log.json"]):
+        return
     segs = subtitles.load_segments(scratch / "segments.json")
     zh = json.loads((scratch / "zh.json").read_text(encoding="utf-8"))
     gen_log = json.loads((scratch / "generate_log.json").read_text())
@@ -114,6 +170,10 @@ def cmd_dub_fix(args):
 
 def cmd_dub_finalize(args):
     scratch = _scratch(args.project_id)
+    inputs = [scratch / "generate_log.json", scratch / "fix_log.json",
+              scratch / "segments.json", scratch / "zh.json"]
+    if not _stage_gate(args, [scratch / "dub_master_final.wav", scratch / "finalize_log.json"], inputs):
+        return
     segs = subtitles.load_segments(scratch / "segments.json")
     zh = json.loads((scratch / "zh.json").read_text(encoding="utf-8"))
     gen_log = json.loads((scratch / "generate_log.json").read_text())
@@ -125,6 +185,8 @@ def cmd_dub_tighten(args):
     scratch = _scratch(args.project_id)
     project_dir = paths.resolve_project_dir(args.project_id)
     master = paths.find_master_video(project_dir)
+    if not _stage_gate(args, [scratch / "dub_master_padded.wav"], [scratch / "dub_master_final.wav"]):
+        return
     cfg = get_config()
     src_dur_ms = render.probe_duration_ms(cfg.ffmpeg_path, master)
     result = dub.tighten(scratch / "dub_master_final.wav", src_dur_ms, scratch / "dub_master_padded.wav")
@@ -143,6 +205,8 @@ def cmd_dub_mix_me(args):
         print(f"no {me_wav.name} found at project root -- skipping, dub ships without a background bed")
         return
     out_path = scratch / "dub_master_mixed.wav"
+    if not _stage_gate(args, [out_path], [scratch / "dub_master_padded.wav", me_wav]):
+        return
     result = dub.mix_me(scratch / "dub_master_padded.wav", me_wav, out_path)
     print(json.dumps(result, indent=2))
     print(f"wrote {out_path}")
@@ -153,6 +217,9 @@ def cmd_align_dub(args):
     scratch = _scratch(args.project_id)
     project_dir = paths.resolve_project_dir(args.project_id)
     out = paths.deliverable_paths(project_dir)
+    inputs = [scratch / "dub_master_final.wav", scratch / "finalize_log.json", scratch / "zh.json"]
+    if not _stage_gate(args, [out["bilingual_cndub_srt"]], inputs):
+        return
     cfg = get_config()
 
     segs = subtitles.load_segments(scratch / "segments.json")
@@ -162,13 +229,20 @@ def cmd_align_dub(args):
     actual_ms = {c["idx"]: c["final_ms"] for c in finalize_log["chunks"]}
 
     chunks = dub._chunk_segments(segs, dub.CHUNK_SIZE)
+    # Same timeline finalize used to assemble the audio: lead silence + the
+    # real inter-chunk gaps. Reading with the old gapless accumulation here
+    # would extract each chunk from the wrong offset in the gapped track, so
+    # the burned subtitles would slide off the voice.
+    timeline = dub.chunk_timeline(segs, dub.CHUNK_SIZE)
+    gaps = timeline["gaps"]
     all_cues = []
-    chunk_abs_start = 0
+    chunk_abs_start = timeline["lead_ms"]
     align_dir = scratch / "align_chunks"
     align_dir.mkdir(exist_ok=True)
 
-    for c in chunks:
+    for pos, c in enumerate(chunks):
         idx = c["idx"]
+        chunk_abs_start += gaps[pos]
         chunk_dur = actual_ms[idx]
         zh_slice = zh[c["seg_start"]:c["seg_end"]]
         en_slice = [s["text"] for s in segs[c["seg_start"]:c["seg_end"]]]
@@ -198,6 +272,8 @@ def cmd_thumb_clean(args):
         sys.exit(f"{cfg_path} not found -- create it first (see thumbnail.py's schema docstring)")
     tc = thumbnail.load_thumb_config(cfg_path)
     out = scratch / "thumb_cleaned.png"
+    if not _stage_gate(args, [out], [cfg_path, Path(tc["source_image"])]):
+        return
     thumbnail.clean_source_thumbnail(
         Path(tc["source_image"]), tc["remove_text_description"], tc["scene_description"], out,
     )
@@ -210,6 +286,8 @@ def cmd_thumb_render(args):
     out_paths = paths.deliverable_paths(project_dir)
     tc = thumbnail.load_thumb_config(scratch / "thumb_config.json")
     base = scratch / "thumb_cleaned.png" if tc.get("clean_first", True) else Path(tc["source_image"])
+    if not _stage_gate(args, [out_paths["cover_jpg"]], [scratch / "thumb_config.json", base]):
+        return
     thumbnail.render(base, tc, out_paths["cover_jpg"])
     print(f"wrote {out_paths['cover_jpg']}")
 
@@ -217,22 +295,184 @@ def cmd_thumb_render(args):
 def cmd_render_ensub(args):
     scratch = _scratch(args.project_id)
     project_dir = paths.resolve_project_dir(args.project_id)
-    master = paths.find_master_video(project_dir)
+    master = paths.effective_master(project_dir, scratch)
     out = paths.deliverable_paths(project_dir)
+    if not _stage_gate(args, [out["ensub_mp4"]], [master, scratch / "bilingual_ensub.srt"]):
+        return
     render.render_ensub(master, scratch / "bilingual_ensub.srt", out["ensub_mp4"], scratch / "render_ensub.log")
-    print(f"wrote {out['ensub_mp4']}")
+    print(f"wrote {out['ensub_mp4']} (video source: {master.name})")
 
 
 def cmd_render_cndub(args):
     scratch = _scratch(args.project_id)
     project_dir = paths.resolve_project_dir(args.project_id)
-    master = paths.find_master_video(project_dir)
+    master = paths.effective_master(project_dir, scratch)
     out = paths.deliverable_paths(project_dir)
     mixed_path = scratch / "dub_master_mixed.wav"
     zh_vo = mixed_path if mixed_path.exists() else scratch / "dub_master_padded.wav"
+    if not _stage_gate(args, [out["cndub_mp4"]], [master, zh_vo, out["bilingual_cndub_srt"]]):
+        return
     render.render_cndub(master, zh_vo, out["bilingual_cndub_srt"],
                          out["cndub_mp4"], scratch / "render_cndub.log")
-    print(f"wrote {out['cndub_mp4']} (audio source: {zh_vo.name})")
+    print(f"wrote {out['cndub_mp4']} (audio source: {zh_vo.name}, video source: {master.name})")
+
+
+def _require_screentext_enabled():
+    if not get_config().screentext_enabled:
+        sys.exit(
+            "In-screen text localization is disabled (experimental). Set "
+            '"screentext_enabled": true in config.json to try it. Renders '
+            "use the raw master until then."
+        )
+
+
+def cmd_screentext_detect(args):
+    _require_screentext_enabled()
+    scratch = _scratch(args.project_id)
+    project_dir = paths.resolve_project_dir(args.project_id)
+    master = paths.find_master_video(project_dir)  # detect on the RAW master, always
+    events_json = scratch / "screentext" / "screentext_events.json"
+    if not _stage_gate(args, [events_json], [master]):
+        return
+    result = screentext.detect_text_events(master, scratch)
+    print(f"detected {result['event_count']} on-screen text event(s), "
+          f"{result['unstable_count']} unstable (moving -- will be skipped + listed)")
+    print(f"wrote {events_json}")
+    print("Next: translate each event's `text` to Chinese (live judgment, glossary-checked, "
+          "same as subtitles), write a JSON array of strings in the same order, then "
+          "`screentext ingest-translation`. Review unstable events by eye -- their in-frame "
+          "text moves, so a static patch can't cover them.")
+
+
+def cmd_screentext_ingest_translation(args):
+    _require_screentext_enabled()
+    scratch = _scratch(args.project_id)
+    data = screentext.load_events(scratch)
+    zh = json.loads(Path(args.zh_json).read_text(encoding="utf-8"))
+    n = len(data["events"])
+    if len(zh) != n:
+        sys.exit(f"translation has {len(zh)} lines, {n} text events detected -- must match 1:1")
+    shutil.copy(args.zh_json, scratch / "screentext" / "screentext_zh.json")
+    print(f"ingested {len(zh)} translated on-screen strings")
+
+
+def cmd_screentext_localize(args):
+    _require_screentext_enabled()
+    scratch = _scratch(args.project_id)
+    project_dir = paths.resolve_project_dir(args.project_id)
+    master = paths.find_master_video(project_dir)  # composite onto the RAW master
+    st_dir = scratch / "screentext"
+    out_path = paths.localized_master_path(scratch)
+    inputs = [master, st_dir / "screentext_events.json", st_dir / "screentext_zh.json"]
+    if not _stage_gate(args, [out_path], inputs):
+        return
+    data = screentext.load_events(scratch)
+    zh = json.loads((st_dir / "screentext_zh.json").read_text(encoding="utf-8"))
+    result = screentext.build_localized_master(
+        master, data["events"], zh, data["frame_w"], data["frame_h"], scratch, out_path,
+    )
+    print(json.dumps({k: v for k, v in result.items() if k != "skipped_unstable"}, indent=2))
+    if result["skipped_unstable"]:
+        print(f"\n{len(result['skipped_unstable'])} moving/unstable event(s) NOT localized "
+              "-- static patch can't cover in-frame motion. Resolve by hand if they matter:")
+        for s in result["skipped_unstable"]:
+            print(f"  [{s['idx']}] @{s['start_ms']}ms drift={s['drift_frac']} "
+                  f"\"{s['text']}\" -> \"{s['zh']}\"")
+    if not result["localized"]:
+        print("\nNo localized master written -- renders will use the raw master unchanged.")
+
+
+def cmd_review_submit(args):
+    """Upload the finished cndub to Frame.io for native-speaker review and
+    print the share link (paste into the Chinese DB's `Frame.io link` field)."""
+    project_dir = paths.resolve_project_dir(args.project_id)
+    out = paths.deliverable_paths(project_dir)
+    if not out["cndub_mp4"].exists():
+        sys.exit(f"{out['cndub_mp4'].name} not found -- render it before submitting for review")
+    result = frameio._api_upload_for_review(out["cndub_mp4"])
+    scratch = _scratch(args.project_id)
+    (scratch / "review_link.txt").write_text(result.get("review_link", ""), encoding="utf-8")
+    print(json.dumps(result, indent=2))
+
+
+def cmd_review_fetch(args):
+    """Pull the reviewer's time-coded comments, resolve each to its cue, and
+    classify into auto-fixable vs needs-human. Works live (--asset-id) or from
+    an exported comments file (--comments-json)."""
+    scratch = _scratch(args.project_id)
+    project_dir = paths.resolve_project_dir(args.project_id)
+    out = paths.deliverable_paths(project_dir)
+    cues = frameio.parse_cndub_cues(out["bilingual_cndub_srt"])
+    comments = frameio.fetch_comments(
+        args.asset_id, Path(args.comments_json) if args.comments_json else None
+    )
+    report = frameio.build_review_report(comments, cues)
+    (scratch / "review_report.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    lines = [f"# Review report — {args.project_id}", "",
+             f"{report['comment_count']} comment(s): "
+             f"{report['auto_count']} auto-fixable, {report['human_count']} need a human", ""]
+    if report["auto_fixable"]:
+        lines.append("## Auto-fixable (term/typo with a concrete replacement)")
+        for e in report["auto_fixable"]:
+            lines.append(f"- cue {e['cue_idx']}: `{e['replacement']['old']}` → "
+                         f"`{e['replacement']['new']}`  — {e['author']}: \"{e['text']}\"")
+        lines.append("")
+    if report["needs_human"]:
+        lines.append("## Needs a human")
+        for e in report["needs_human"]:
+            loc = f"cue {e['cue_idx']}" if e["cue_idx"] else "unresolved"
+            lines.append(f"- [{e['category']}] {loc}: \"{e['text']}\" — {e.get('human_reason','')}")
+    (scratch / "review_report.md").write_text("\n".join(lines), encoding="utf-8")
+    print(f"{report['comment_count']} comment(s): {report['auto_count']} auto-fixable, "
+          f"{report['human_count']} need a human")
+    print(f"wrote {scratch / 'review_report.json'} and review_report.md")
+
+
+def cmd_review_apply(args):
+    """Apply the auto-fixable term/typo swaps to zh.json (backing up the old
+    one), and print the human queue + which stages to re-run."""
+    scratch = _scratch(args.project_id)
+    report = json.loads((scratch / "review_report.json").read_text(encoding="utf-8"))
+    zh_path = scratch / "zh.json"
+    zh = json.loads(zh_path.read_text(encoding="utf-8"))
+    new_zh, changelog = frameio.apply_auto_fixes(report, zh)
+
+    applied = [c for c in changelog if c["status"] == "applied"]
+    if applied:
+        shutil.copy(zh_path, scratch / "zh.pre_review.json")  # keep the pre-fix translation
+        zh_path.write_text(json.dumps(new_zh, ensure_ascii=False, indent=2), encoding="utf-8")
+    for c in changelog:
+        print(json.dumps(c, ensure_ascii=False))
+    print(f"\napplied {len(applied)} fix(es) to zh.json" if applied else "\nno auto-fixes applied")
+    if applied:
+        print("Re-run to propagate (SKIP_OK redoes only what's downstream of zh.json):")
+        print("  cn-pipeline subtitles build-srt --project-id {id}")
+        print("  cn-pipeline dub generate --project-id {id}   # text cache re-buys only changed chunks")
+        print("  ...then dub finalize -> tighten -> mix-me -> align align-dub -> render (ensub/cndub/verify)")
+    if report["needs_human"]:
+        print(f"\n{report['human_count']} comment(s) still need a human (see review_report.md) -- "
+              "pacing/sync and anything without a concrete replacement are never auto-applied.")
+
+
+def cmd_render_verify(args):
+    """Stage 5 close-out gate: both rendered files must match the source
+    duration within render.DURATION_TOLERANCE_MS, or the run isn't done."""
+    project_dir = paths.resolve_project_dir(args.project_id)
+    master = paths.find_master_video(project_dir)
+    out = paths.deliverable_paths(project_dir)
+    results = render.verify_outputs(master, [out["ensub_mp4"], out["cndub_mp4"]])
+    failed = [r for r in results if not r["ok"]]
+    for r in results:
+        print(json.dumps(r))
+    if failed:
+        sys.exit(
+            f"FAIL: {', '.join(r['file'] for r in failed)} -- duration off by more than "
+            f"{render.DURATION_TOLERANCE_MS}ms (or missing). Something upstream broke; "
+            "diagnose it, don't re-render-and-hope (cn_workflow.html Stage 5)."
+        )
+    print(f"PASS: both outputs within {render.DURATION_TOLERANCE_MS}ms of source duration")
 
 
 def main():
@@ -242,6 +482,10 @@ def main():
     def add(group_parsers, name, fn):
         sub_p = group_parsers.add_parser(name)
         sub_p.add_argument("--project-id", required=True)
+        sub_p.add_argument("--force", action="store_true",
+                           help="redo this stage even if its outputs are up to date "
+                                "(downstream stages then rerun automatically -- their "
+                                "inputs become newer than their outputs)")
         sub_p.set_defaults(func=fn)
         return sub_p
 
@@ -271,9 +515,23 @@ def main():
     add(thumb_group, "clean", cmd_thumb_clean)
     add(thumb_group, "render", cmd_thumb_render)
 
+    st_group = sub.add_parser("screentext").add_subparsers(dest="cmd", required=True)
+    add(st_group, "detect", cmd_screentext_detect)
+    st_ingest = add(st_group, "ingest-translation", cmd_screentext_ingest_translation)
+    st_ingest.add_argument("--zh-json", required=True, dest="zh_json")
+    add(st_group, "localize", cmd_screentext_localize)
+
     render_group = sub.add_parser("render").add_subparsers(dest="cmd", required=True)
     add(render_group, "ensub", cmd_render_ensub)
     add(render_group, "cndub", cmd_render_cndub)
+    add(render_group, "verify", cmd_render_verify)
+
+    review_group = sub.add_parser("review").add_subparsers(dest="cmd", required=True)
+    add(review_group, "submit", cmd_review_submit)
+    review_fetch = add(review_group, "fetch", cmd_review_fetch)
+    review_fetch.add_argument("--asset-id", dest="asset_id", default=None)
+    review_fetch.add_argument("--comments-json", dest="comments_json", default=None)
+    add(review_group, "apply", cmd_review_apply)
 
     args = p.parse_args()
     try:

@@ -1,0 +1,27 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  logic-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Pure-logic tests only -- they stub the heavy runtime deps
+      # (torch/whisper/easyocr/pydub/PIL) via tests/_bootstrap.py, so CI needs
+      # no pip install and runs in seconds. End-to-end media behavior is
+      # validated by hand on a real machine (see docs/VALIDATE.md).
+      - name: byte-compile
+        run: python -m compileall cn_pipeline
+      - name: run logic tests
+        run: |
+          for t in tests/test_*.py; do
+            echo "--- $t ---"
+            python "$t"
+          done

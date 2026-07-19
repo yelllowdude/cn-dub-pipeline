@@ -32,6 +32,7 @@ import requests
 from PIL import Image, ImageDraw, ImageFont
 
 from cn_pipeline.config import get_config
+from cn_pipeline.spend import record_call
 
 KIE_UPLOAD_URL = "https://kieai.redpandaai.co/api/file-base64-upload"
 KIE_CREATE_TASK_URL = "https://api.kie.ai/api/v1/jobs/createTask"
@@ -79,6 +80,8 @@ def clean_source_thumbnail(
         f"behind it so no text or text-shaped artifact remains. Do NOT change "
         f"anything else: {scene_description}. Keep the 16:9 composition."
     )
+    # out_path lives in the run scratch dir; the createTask call is the paid part
+    record_call(out_path.parent, "kie", cfg.max_kie_calls_per_run)
     task = requests.post(
         KIE_CREATE_TASK_URL,
         headers={"Authorization": f"Bearer {cfg.kie_api_key}", "Content-Type": "application/json"},
@@ -89,11 +92,22 @@ def clean_source_thumbnail(
     task.raise_for_status()
     task_id = task.json()["data"]["taskId"]
 
+    img_url = _poll_kie_task(cfg.kie_api_key, task_id, poll_timeout_s)
+    img = requests.get(img_url, timeout=60)
+    img.raise_for_status()
+    out_path.write_bytes(img.content)
+    return out_path
+
+
+def _poll_kie_task(kie_api_key: str, task_id: str, poll_timeout_s: int = 180) -> str:
+    """Poll a KIE createTask job to completion and return its first result URL.
+    Shared by the thumbnail clean and the in-screen-text clean (screentext.py)
+    so the success/fail/timeout handling lives in exactly one place."""
     deadline = time.time() + poll_timeout_s
     while time.time() < deadline:
         time.sleep(5)
-        r = requests.get(KIE_RECORD_INFO_URL, headers={"Authorization": f"Bearer {cfg.kie_api_key}"},
-                          params={"taskId": task_id}, timeout=30)
+        r = requests.get(KIE_RECORD_INFO_URL, headers={"Authorization": f"Bearer {kie_api_key}"},
+                         params={"taskId": task_id}, timeout=30)
         r.raise_for_status()
         d = r.json()["data"]
         state = d.get("state")
@@ -103,10 +117,7 @@ def clean_source_thumbnail(
             urls = (result or {}).get("resultUrls") or (result or {}).get("output") or []
             if not urls:
                 raise RuntimeError(f"KIE task succeeded but returned no result URL: {d}")
-            img = requests.get(urls[0], timeout=60)
-            img.raise_for_status()
-            out_path.write_bytes(img.content)
-            return out_path
+            return urls[0]
         if state in ("fail", "failed", "FAIL"):
             raise RuntimeError(f"KIE nano-banana-edit task failed: {d}")
 

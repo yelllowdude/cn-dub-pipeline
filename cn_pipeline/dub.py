@@ -25,12 +25,14 @@ version -- re-read it, don't rely on this docstring, if a threshold changes):
 import json
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import requests
 from pydub import AudioSegment
 
 from cn_pipeline.config import get_config
+from cn_pipeline.spend import record_call
 from cn_pipeline.subtitles import parse_srt_time
 
 VOICE_ID = "MI36FIkp9wRP7cpWKPTl"  # Evan Zhao
@@ -40,6 +42,12 @@ CHUNK_SIZE = 15
 SUB_CHUNK_SIZE = 5
 GEN_ATEMPO_MIN, GEN_ATEMPO_MAX = 0.85, 1.4
 FIX_ATEMPO_MIN, FIX_ATEMPO_MAX = 0.85, 1.45
+
+# Chunks are independent TTS calls -- nothing about chunk 5 depends on chunk 4
+# (see cn_workflow.html Stage 4's "concurrently, not a for-loop" rule; this
+# was documented behavior before it was implemented behavior). Kept modest so
+# a burst can't trip ElevenLabs' concurrent-request limit.
+TTS_CONCURRENCY = 4
 
 
 def _chunk_segments(segments: list[dict], chunk_size: int) -> list[dict]:
@@ -57,7 +65,43 @@ def _chunk_segments(segments: list[dict], chunk_size: int) -> list[dict]:
     return chunks
 
 
-def _tts_call(api_key: str, texts: list[str]) -> bytes:
+def chunk_timeline(segments: list[dict], chunk_size: int = CHUNK_SIZE) -> dict:
+    """Where each chunk sits on the ORIGINAL video's timeline.
+
+    A chunk is fitted to its own internal span (first cue start -> last cue
+    end), so concatenating chunks back-to-back drops the leading silence before
+    the first chunk AND every inter-chunk gap (the quiet between one chunk's
+    last cue and the next chunk's first cue). Those dropped gaps accumulate and
+    surface as a lump of trailing silence that `tighten` pads at the end --
+    which slides the whole dub forward relative to the picture. Observed in
+    production (max-strength_2026-03-12: ~3.9s of real inter-chunk gap pushed
+    to the tail, VO drifting against on-screen cuts in the second half).
+
+    Returns {lead_ms, gaps} where lead_ms is the silence before chunk 1 and
+    gaps[i] is the silence to insert BEFORE chunk i (gaps[0] == 0; the lead is
+    handled separately). Both `finalize` (to insert the silence) and
+    `align_dub` (to place cues at the matching offsets) consume this, so the
+    assembled audio and the burned subtitles share one timeline definition and
+    can't drift apart."""
+    chunks = _chunk_segments(segments, chunk_size)
+    bounds = []
+    for c in chunks:
+        first = segments[c["seg_start"]]
+        last = segments[c["seg_end"] - 1]
+        start = parse_srt_time(first["time"].split(" --> ")[0])
+        end = parse_srt_time(last["time"].split(" --> ")[1])
+        bounds.append((start, end))
+
+    lead_ms = bounds[0][0] if bounds else 0
+    gaps = [0]
+    for i in range(1, len(bounds)):
+        gaps.append(max(0, bounds[i][0] - bounds[i - 1][1]))
+    return {"lead_ms": lead_ms, "gaps": gaps}
+
+
+def _tts_call(api_key: str, texts: list[str], scratch_dir: Path) -> bytes:
+    cfg = get_config()
+    record_call(scratch_dir, "tts", cfg.max_tts_calls_per_run)
     combined = "\n".join(texts)
     last_err = None
     for _attempt in range(3):
@@ -76,6 +120,20 @@ def _tts_call(api_key: str, texts: list[str]) -> bytes:
         last_err = f"{resp.status_code}: {resp.text[:200]}"
         time.sleep(3)
     raise RuntimeError(f"ElevenLabs TTS failed after 3 attempts: {last_err}")
+
+
+def _tts_cached(api_key: str, texts: list[str], raw_path: Path, scratch_dir: Path) -> None:
+    """Generate raw TTS audio at raw_path, reusing a cached take ONLY if it was
+    generated from these exact texts. A bare raw_path.exists() check (the old
+    behavior) reuses stale audio after a translation edit -- the rerun then
+    ships a dub whose voice disagrees with the subtitles, silently. The texts
+    that produced each take are stored alongside it and compared verbatim."""
+    texts_path = raw_path.with_suffix(".texts.json")
+    if raw_path.exists() and texts_path.exists():
+        if json.loads(texts_path.read_text(encoding="utf-8")) == texts:
+            return
+    raw_path.write_bytes(_tts_call(api_key, texts, scratch_dir))
+    texts_path.write_text(json.dumps(texts, ensure_ascii=False), encoding="utf-8")
 
 
 def _apply_atempo(ffmpeg_path: str, in_path: Path, out_path: Path, atempo: float) -> None:
@@ -97,13 +155,27 @@ def generate(segments: list[dict], zh_lines: list[str], scratch_dir: Path) -> di
     chunks = _chunk_segments(segments, CHUNK_SIZE)
     log = {"chunks": [], "capped_chunks": []}
 
+    # TTS pass first, concurrently -- each chunk is an independent API call
+    # writing its own file. _tts_cached no-ops for chunks whose cached take
+    # already matches the current translation, so a resume or a rerun after
+    # a partial translation edit only pays for what actually changed.
+    with ThreadPoolExecutor(max_workers=TTS_CONCURRENCY) as pool:
+        futures = {
+            pool.submit(
+                _tts_cached, cfg.elevenlabs_api_key,
+                zh_lines[c["seg_start"]:c["seg_end"]],
+                chunks_dir / f"{c['idx']:02d}_raw.mp3", scratch_dir,
+            ): c["idx"]
+            for c in chunks
+        }
+        for fut in as_completed(futures):
+            fut.result()  # re-raise the first TTS/spend-cap failure loudly
+
+    # Tempo-fit pass, sequential -- local ffmpeg work, and the log order
+    # should match chunk order.
     for c in chunks:
-        texts = zh_lines[c["seg_start"]:c["seg_end"]]
         raw_path = chunks_dir / f"{c['idx']:02d}_raw.mp3"
         stretched_path = chunks_dir / f"{c['idx']:02d}_stretched.wav"
-
-        if not raw_path.exists():
-            raw_path.write_bytes(_tts_call(cfg.elevenlabs_api_key, texts))
 
         raw_clip = AudioSegment.from_mp3(raw_path)
         actual_ms = len(raw_clip)
@@ -156,8 +228,7 @@ def fix_overflow_chunks(segments: list[dict], zh_lines: list[str], scratch_dir: 
         for k, sc in enumerate(sub_chunks, 1):
             raw_path = fix_dir / f"{idx:02d}_{k:02d}_raw.mp3"
             stretched_path = fix_dir / f"{idx:02d}_{k:02d}_stretched.wav"
-            if not raw_path.exists():
-                raw_path.write_bytes(_tts_call(cfg.elevenlabs_api_key, sc["texts"]))
+            _tts_cached(cfg.elevenlabs_api_key, sc["texts"], raw_path, scratch_dir)
             raw_clip = AudioSegment.from_mp3(raw_path)
             ratio = len(raw_clip) / sc["target_ms"] if sc["target_ms"] else 1.0
             atempo = max(FIX_ATEMPO_MIN, min(FIX_ATEMPO_MAX, ratio))
@@ -198,8 +269,9 @@ def _last_chunk_gap_aware_rebuild(
 
         raw_path = fix_dir / f"{idx:02d}_cue{j:02d}_raw.mp3"
         stretched_path = fix_dir / f"{idx:02d}_cue{j:02d}_stretched.wav"
-        if not raw_path.exists():
-            raw_path.write_bytes(_tts_call(api_key, [zh]))
+        # fix_dir sits directly under the run scratch dir, which is where the
+        # spend counter lives
+        _tts_cached(api_key, [zh], raw_path, fix_dir.parent)
         raw_clip = AudioSegment.from_mp3(raw_path)
         cue_target_ms = end_ms - start_ms
         ratio = len(raw_clip) / cue_target_ms if cue_target_ms else 1.0
@@ -226,15 +298,24 @@ def finalize(segments: list[dict], zh_lines: list[str], scratch_dir: Path, cappe
 
     chunks = _chunk_segments(segments, CHUNK_SIZE)
     last_idx = chunks[-1]["idx"] if chunks else None
-    final_master = AudioSegment.empty()
-    log = {"chunks": []}
+    timeline = chunk_timeline(segments, CHUNK_SIZE)
+    lead_ms, gaps = timeline["lead_ms"], timeline["gaps"]
 
-    for c in chunks:
+    # Anchor the assembly to the original timeline: leading silence before the
+    # first chunk, then the real inter-chunk gap before each subsequent chunk.
+    # Without this the dub loses every gap between chunks and slides forward
+    # against the picture (see chunk_timeline).
+    final_master = AudioSegment.silent(duration=lead_ms) if lead_ms > 0 else AudioSegment.empty()
+    log = {"chunks": [], "lead_ms": lead_ms, "inter_chunk_gap_ms": sum(gaps)}
+
+    for pos, c in enumerate(chunks):
         idx = c["idx"]
+        if gaps[pos] > 0:
+            final_master += AudioSegment.silent(duration=gaps[pos])
         if idx not in capped_chunks:
             clip = AudioSegment.from_wav(chunks_dir / f"{idx:02d}_stretched.wav")
             final_master += clip
-            log["chunks"].append({"idx": idx, "action": "reused", "final_ms": len(clip)})
+            log["chunks"].append({"idx": idx, "action": "reused", "gap_before_ms": gaps[pos], "final_ms": len(clip)})
             continue
 
         rebuilt_path = fix_dir / f"{idx:02d}_rebuilt.wav"
