@@ -115,8 +115,9 @@ def cmd_dub_fix(args):
 def cmd_dub_finalize(args):
     scratch = _scratch(args.project_id)
     segs = subtitles.load_segments(scratch / "segments.json")
+    zh = json.loads((scratch / "zh.json").read_text(encoding="utf-8"))
     gen_log = json.loads((scratch / "generate_log.json").read_text())
-    out = dub.finalize(segs, scratch, gen_log["capped_chunks"])
+    out = dub.finalize(segs, zh, scratch, gen_log["capped_chunks"])
     print(f"wrote {out}")
 
 
@@ -132,6 +133,19 @@ def cmd_dub_tighten(args):
         print(f"NOTE: padded {result['pad_ms']}ms of trailing silence -- confirm this matches "
               f"a real trailing pause in the source (check the tail isn't actually untranscribed "
               f"speech) before trusting it, per the last-chunk exception rule in cn_workflow.html Stage 4.")
+
+
+def cmd_dub_mix_me(args):
+    scratch = _scratch(args.project_id)
+    project_dir = paths.resolve_project_dir(args.project_id)
+    me_wav = paths.me_wav_path(project_dir)
+    if not me_wav.exists():
+        print(f"no {me_wav.name} found at project root -- skipping, dub ships without a background bed")
+        return
+    out_path = scratch / "dub_master_mixed.wav"
+    result = dub.mix_me(scratch / "dub_master_padded.wav", me_wav, out_path)
+    print(json.dumps(result, indent=2))
+    print(f"wrote {out_path}")
 
 
 def cmd_align_dub(args):
@@ -214,9 +228,11 @@ def cmd_render_cndub(args):
     project_dir = paths.resolve_project_dir(args.project_id)
     master = paths.find_master_video(project_dir)
     out = paths.deliverable_paths(project_dir)
-    render.render_cndub(master, scratch / "dub_master_padded.wav", out["bilingual_cndub_srt"],
+    mixed_path = scratch / "dub_master_mixed.wav"
+    zh_vo = mixed_path if mixed_path.exists() else scratch / "dub_master_padded.wav"
+    render.render_cndub(master, zh_vo, out["bilingual_cndub_srt"],
                          out["cndub_mp4"], scratch / "render_cndub.log")
-    print(f"wrote {out['cndub_mp4']}")
+    print(f"wrote {out['cndub_mp4']} (audio source: {zh_vo.name})")
 
 
 def main():
@@ -249,6 +265,7 @@ def main():
     add(dub_group, "fix", cmd_dub_fix)
     add(dub_group, "finalize", cmd_dub_finalize)
     add(dub_group, "tighten", cmd_dub_tighten)
+    add(dub_group, "mix-me", cmd_dub_mix_me)
 
     thumb_group = sub.add_parser("thumbnail").add_subparsers(dest="cmd", required=True)
     add(thumb_group, "clean", cmd_thumb_clean)

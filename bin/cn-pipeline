@@ -1,0 +1,22 @@
+#!/bin/bash
+# Wrapper so the skill can call `cn-pipeline <subcommand> ...` regardless of
+# whether it's running from a direct clone (local dev) or an installed plugin
+# (no cwd guarantee). Resolves its own venv rather than assuming one's active.
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${CLAUDE_PLUGIN_ROOT:-$(dirname "$SCRIPT_DIR")}"
+DATA="${CLAUDE_PLUGIN_DATA:-$ROOT}"
+VENV="$DATA/venv"
+
+# Local-dev fallback: an existing repo-root .venv (predates plugin packaging).
+if [ ! -x "$VENV/bin/python" ] && [ -x "$ROOT/.venv/bin/python" ]; then
+  VENV="$ROOT/.venv"
+fi
+
+if [ ! -x "$VENV/bin/python" ]; then
+  echo "No Python venv found at $VENV -- run cn-pipeline-setup first (see README)." >&2
+  exit 1
+fi
+
+exec env PYTHONPATH="$ROOT" "$VENV/bin/python" -m cn_pipeline.cli "$@"

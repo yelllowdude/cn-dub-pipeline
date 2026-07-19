@@ -1,0 +1,15 @@
+{
+  "name": "gravgear-tools",
+  "owner": {
+    "name": "Gravgear"
+  },
+  "description": "Internal Gravgear/Yellow Dude Claude Code tools.",
+  "plugins": [
+    {
+      "name": "cn-dub-pipeline",
+      "source": "./",
+      "description": "Chinese localization pipeline -- transcribe, translate, dub, align, render, thumbnail for Bilibili.",
+      "version": "1.0.0"
+    }
+  ]
+}

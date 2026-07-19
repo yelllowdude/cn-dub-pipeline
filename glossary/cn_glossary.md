@@ -10,6 +10,7 @@ the individual `{id}_zh.srt`) so it's consistent on the next video too.
 |---|---|
 | "Go Bananas" | Stays in English. Always. Reads as explosive progress / beast-mode strength — the way "Just Do It" is never translated. Translate the rest of the sentence naturally around it: *"你的力量马上要 go bananas 了"*. |
 | "Yellow Dude" | → 光头黄 only. (Confirmed against the channel's own live upload title — not 黄头黄.) |
+| "hamstring(s)" | → 大腿后侧 (or 大腿后侧肌群 for the full-noun form), never 腘绳肌. The 腘 character (guó) is reliably mispronounced by the ElevenLabs TTS voice used for this pipeline — confirmed on `mobility-routine_2026-5-2`'s cndub. 大腿后侧 is accurate for a fitness audience and avoids the character entirely. |
 
 ## Title-suffix convention (not a glossary term, but equally locked)
 

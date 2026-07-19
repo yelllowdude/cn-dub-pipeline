@@ -11,8 +11,14 @@ import os
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CONFIG_PATH = REPO_ROOT / "config.json"
-ENV_PATH = REPO_ROOT / ".env"
+# Machine-specific state (.env, config.json) lives in CLAUDE_PLUGIN_DATA when
+# running as an installed plugin, since that directory survives plugin
+# updates and REPO_ROOT (the plugin's synced copy) doesn't. Local dev via a
+# direct clone has no CLAUDE_PLUGIN_DATA set, so this falls back to REPO_ROOT
+# unchanged -- same behavior as before this was packaged as a plugin.
+DATA_ROOT = Path(os.environ.get("CLAUDE_PLUGIN_DATA", REPO_ROOT))
+CONFIG_PATH = DATA_ROOT / "config.json"
+ENV_PATH = DATA_ROOT / ".env"
 
 FFMPEG_FULL_DEFAULT = "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg"
 
@@ -24,8 +30,9 @@ class ConfigError(RuntimeError):
 def _load_env():
     if not ENV_PATH.exists():
         raise ConfigError(
-            f"No .env file at {ENV_PATH}. Copy .env.example to .env and fill in "
-            "ELEVENLABS_API_KEY and KIE_API_KEY (get these from Wayne via a secure channel)."
+            f"No .env file at {ENV_PATH}. Run cn-pipeline-setup (or copy .env.example "
+            "to .env yourself) and fill in ELEVENLABS_API_KEY and KIE_API_KEY "
+            "(get these from Wayne via a secure channel)."
         )
     for line in ENV_PATH.read_text().splitlines():
         line = line.strip()
@@ -38,7 +45,8 @@ def _load_env():
 def _load_config() -> dict:
     if not CONFIG_PATH.exists():
         raise ConfigError(
-            f"No config.json at {CONFIG_PATH}. Copy config.example.json to config.json "
+            f"No config.json at {CONFIG_PATH}. Run cn-pipeline-setup (or copy "
+            "config.example.json to config.json yourself) "
             "and fill in your drive_root path (see README)."
         )
     return json.loads(CONFIG_PATH.read_text())

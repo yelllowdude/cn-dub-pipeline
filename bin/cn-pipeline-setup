@@ -1,0 +1,40 @@
+#!/bin/bash
+# One-time per-machine setup: venv + starter .env/config.json.
+# Lives in CLAUDE_PLUGIN_DATA (not CLAUDE_PLUGIN_ROOT) so it survives plugin
+# updates -- an update re-syncs the plugin's tracked files, not this.
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${CLAUDE_PLUGIN_ROOT:-$(dirname "$SCRIPT_DIR")}"
+DATA="${CLAUDE_PLUGIN_DATA:-$ROOT}"
+VENV="$DATA/venv"
+
+mkdir -p "$DATA"
+
+if [ -x "$VENV/bin/python" ]; then
+  echo "venv already exists at $VENV -- reinstalling requirements."
+  "$VENV/bin/pip" install -q -r "$ROOT/requirements.txt"
+else
+  echo "Creating venv at $VENV ..."
+  python3.14 -m venv "$VENV"
+  "$VENV/bin/pip" install -q -r "$ROOT/requirements.txt"
+fi
+echo "Python environment ready."
+
+if [ ! -f "$DATA/.env" ]; then
+  cp "$ROOT/.env.example" "$DATA/.env"
+  echo "Created $DATA/.env -- fill in ELEVENLABS_API_KEY and KIE_API_KEY (get these from Wayne via a secure channel)."
+else
+  echo "$DATA/.env already exists, left as-is."
+fi
+
+if [ ! -f "$DATA/config.json" ]; then
+  cp "$ROOT/config.example.json" "$DATA/config.json"
+  echo "Created $DATA/config.json -- set drive_root to your Google Drive path (see README)."
+else
+  echo "$DATA/config.json already exists, left as-is."
+fi
+
+echo
+echo "Next: edit $DATA/.env and $DATA/config.json, then confirm with:"
+echo "  cn-pipeline preflight --project-id <a-real-project-id>"

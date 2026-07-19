@@ -172,15 +172,60 @@ def fix_overflow_chunks(segments: list[dict], zh_lines: list[str], scratch_dir: 
     return log
 
 
-def finalize(segments: list[dict], scratch_dir: Path, capped_chunks: list[int]) -> Path:
+CORRECTIVE_ATEMPO_MIN, CORRECTIVE_ATEMPO_MAX = 0.5, 2.0
+
+
+def _last_chunk_gap_aware_rebuild(
+    api_key: str, ffmpeg_path: str, seg_slice: list[dict], zh_slice: list[str], fix_dir: Path, idx: int
+) -> AudioSegment:
+    """Rebuild the LAST chunk cue-by-cue instead of as one blob, preserving any
+    real internal gap between cues (e.g. a silent/non-verbal visual pause before
+    a closing line like "Thanks for watching"). A single uniform stretch across
+    the whole chunk would force-slow real speech to fill that gap instead --
+    exactly the desync this function exists to avoid. Each cue gets its own
+    TTS call and its own modest tempo fit (clamped like a normal chunk); gaps
+    between consecutive cues are inserted as real silence, not stretched into."""
+    out = AudioSegment.empty()
+    prev_end_ms = None
+    for j, (seg, zh) in enumerate(zip(seg_slice, zh_slice), 1):
+        start_ms = parse_srt_time(seg["time"].split(" --> ")[0])
+        end_ms = parse_srt_time(seg["time"].split(" --> ")[1])
+        if prev_end_ms is not None:
+            gap_ms = start_ms - prev_end_ms
+            if gap_ms > 0:
+                out += AudioSegment.silent(duration=gap_ms, frame_rate=44100)
+        prev_end_ms = end_ms
+
+        raw_path = fix_dir / f"{idx:02d}_cue{j:02d}_raw.mp3"
+        stretched_path = fix_dir / f"{idx:02d}_cue{j:02d}_stretched.wav"
+        if not raw_path.exists():
+            raw_path.write_bytes(_tts_call(api_key, [zh]))
+        raw_clip = AudioSegment.from_mp3(raw_path)
+        cue_target_ms = end_ms - start_ms
+        ratio = len(raw_clip) / cue_target_ms if cue_target_ms else 1.0
+        atempo = max(GEN_ATEMPO_MIN, min(GEN_ATEMPO_MAX, ratio))
+        _apply_atempo(ffmpeg_path, raw_path, stretched_path, atempo)
+        out += AudioSegment.from_wav(stretched_path)
+
+    return out
+
+
+def finalize(segments: list[dict], zh_lines: list[str], scratch_dir: Path, capped_chunks: list[int]) -> Path:
     """Stage 4c: assemble the final track. Reused chunks pass through as-is;
     rebuilt (previously-capped) chunks get an UNCONDITIONAL final corrective
-    tempo pass so every chunk lands within ~50ms of target, no exceptions."""
+    tempo pass so every chunk lands within ~50ms of target, no exceptions --
+    EXCEPT the last chunk in the video, which is exempt from force-stretching
+    (see docs/cn_workflow.html Stage 4): if it undershoots so far that hitting
+    target would mean forcing real speech below CORRECTIVE_ATEMPO_MIN (a real
+    internal or trailing pause, not just an ordinary miss), it's rebuilt
+    cue-by-cue instead, with the true gap between cues inserted as silence
+    rather than stretched into."""
     cfg = get_config()
     chunks_dir = scratch_dir / "chunks"
     fix_dir = scratch_dir / "chunks_fix"
 
     chunks = _chunk_segments(segments, CHUNK_SIZE)
+    last_idx = chunks[-1]["idx"] if chunks else None
     final_master = AudioSegment.empty()
     log = {"chunks": []}
 
@@ -197,13 +242,29 @@ def finalize(segments: list[dict], scratch_dir: Path, capped_chunks: list[int]) 
         target_ms = c["target_ms"]
         ratio = len(rebuilt) / target_ms if target_ms else 1.0
 
+        if idx == last_idx and ratio < CORRECTIVE_ATEMPO_MIN:
+            corrected = _last_chunk_gap_aware_rebuild(
+                cfg.elevenlabs_api_key, cfg.ffmpeg_path,
+                segments[c["seg_start"]:c["seg_end"]], zh_lines[c["seg_start"]:c["seg_end"]],
+                fix_dir, idx,
+            )
+            final_master += corrected
+            log["chunks"].append({
+                "idx": idx, "action": "last_chunk_gap_aware_rebuild",
+                "rebuilt_ms": len(rebuilt), "target_ms": target_ms,
+                "ratio": round(ratio, 4), "final_ms": len(corrected),
+            })
+            continue
+
         final_path = fix_dir / f"{idx:02d}_final.wav"
-        _apply_atempo(cfg.ffmpeg_path, rebuilt_path, final_path, ratio)
+        clamped_ratio = max(CORRECTIVE_ATEMPO_MIN, min(CORRECTIVE_ATEMPO_MAX, ratio))
+        _apply_atempo(cfg.ffmpeg_path, rebuilt_path, final_path, clamped_ratio)
         corrected = AudioSegment.from_wav(final_path)
         final_master += corrected
         log["chunks"].append({
             "idx": idx, "action": "corrective_pass", "rebuilt_ms": len(rebuilt),
-            "target_ms": target_ms, "ratio": round(ratio, 4), "final_ms": len(corrected),
+            "target_ms": target_ms, "ratio": round(ratio, 4),
+            "clamped_ratio": round(clamped_ratio, 4), "final_ms": len(corrected),
         })
 
     out_path = scratch_dir / "dub_master_final.wav"
@@ -213,20 +274,73 @@ def finalize(segments: list[dict], scratch_dir: Path, capped_chunks: list[int]) 
     return out_path
 
 
+OVERSHOOT_AUTO_TRIM_MAX_MS = 5000
+
+
 def tighten(dub_master_path: Path, source_video_duration_ms: int, out_path: Path) -> dict:
     """Last-chunk / trailing-gap exception: if the dub track's natural length
     undershoots the source video's actual duration (a real trailing pause the
     English original didn't fill with speech either -- confirm this against
     the source before trusting it, don't assume), pad with trailing silence
-    rather than stretching speech to fill dead air. If the dub is already the
-    same length or longer, this is a no-op copy."""
+    rather than stretching speech to fill dead air.
+
+    If the dub instead OVERSHOOTS the source by a small amount (observed cause:
+    the last cue's Whisper-transcribed end timestamp running a second or two
+    past the video's actual end -- a transcription-precision artifact, not a
+    real content mismatch), trim the tail by the overshoot so the render-stage
+    duration check (must match source within ~0.1s) can actually pass. This is
+    capped at OVERSHOOT_AUTO_TRIM_MAX_MS: a larger overshoot means something
+    upstream broke and should be flagged, not silently chopped."""
     master = AudioSegment.from_wav(dub_master_path)
     pad_ms = round(source_video_duration_ms - len(master))
 
     if pad_ms > 0:
         padded = master + AudioSegment.silent(duration=pad_ms, frame_rate=master.frame_rate)
+        trimmed_ms = 0
+    elif pad_ms < 0 and -pad_ms <= OVERSHOOT_AUTO_TRIM_MAX_MS:
+        trimmed_ms = -pad_ms
+        padded = master[:source_video_duration_ms]
     else:
         padded = master
+        trimmed_ms = 0
+
     padded.export(out_path, format="wav")
 
-    return {"dub_ms_before_pad": len(master), "pad_ms": max(0, pad_ms), "final_ms": len(padded)}
+    return {
+        "dub_ms_before_pad": len(master), "pad_ms": max(0, pad_ms),
+        "trimmed_ms": trimmed_ms, "final_ms": len(padded),
+    }
+
+
+ME_GAIN_DB = -4.0
+
+
+def mix_me(vo_path: Path, me_wav_path: Path, out_path: Path, me_gain_db: float = ME_GAIN_DB) -> dict:
+    """Mix the tightened Chinese VO track with the project's {id}_me.wav
+    background bed (music + effects, no VO, language-agnostic -- see
+    docs/cn_workflow.html Drive structure). This was previously documented
+    ("me.wav present -> Stage 4 mixes it in") but never actually implemented
+    anywhere in the pipeline -- `preflight` only checked for the file's
+    existence and printed a note; nothing consumed it. This is that step.
+
+    me.wav is attenuated by me_gain_db (default -4dB) so it sits under the
+    dubbed VO rather than competing with it -- the original English mix's
+    balance doesn't transfer directly since the new VO (TTS) has different
+    loudness characteristics than the original human VO that was removed
+    when me.wav was separated out.
+
+    me.wav's length should already match the source video (it's derived
+    from the same master), but is trimmed/padded defensively to the VO's
+    exact length so a mismatch here can't silently desync the final render."""
+    vo = AudioSegment.from_wav(vo_path)
+    me = AudioSegment.from_wav(me_wav_path).apply_gain(me_gain_db)
+
+    if len(me) < len(vo):
+        me = me + AudioSegment.silent(duration=len(vo) - len(me), frame_rate=me.frame_rate)
+    elif len(me) > len(vo):
+        me = me[:len(vo)]
+
+    mixed = vo.overlay(me)
+    mixed.export(out_path, format="wav")
+
+    return {"vo_ms": len(vo), "me_ms_before_trim": len(AudioSegment.from_wav(me_wav_path)), "final_ms": len(mixed)}
