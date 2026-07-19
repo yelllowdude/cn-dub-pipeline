@@ -82,6 +82,12 @@ already-published `{id}_ensub.mp4` / `{id}_cndub.mp4` in that project's Drive
 `/CN/` folder. They should match closely. This confirms your environment
 produces the same result before you run it live on something new.
 
+**Step-by-step checklist:** `docs/VALIDATE.md` is a copy-paste runbook for
+validating against `max-strength_2026-03-12` — the exact commands plus the
+specific before/after numbers to watch (most importantly, `dub tighten`'s pad
+dropping from ~4000ms to the low hundreds, which confirms the inter-chunk
+timeline fix took effect). Follow it on the Mac before the first live run.
+
 ## Running it
 
 In any Claude Code session (no `cd` needed once installed as a plugin):
