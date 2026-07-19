@@ -70,6 +70,25 @@ def run_scratch_dir(project_id: str) -> Path:
     return d
 
 
+def localized_master_path(scratch_dir: Path) -> Path:
+    """The in-screen-text-localized video, if the screentext stage produced one.
+    A large derived intermediate -- kept in scratch (gitignored), not /CN/."""
+    return scratch_dir / "screentext" / "master_localized.mp4"
+
+
+def effective_master(project_dir: Path, scratch_dir: Path) -> Path:
+    """The video the render stage should burn subtitles onto: the localized
+    master when in-screen text localization is enabled AND has produced one,
+    else the raw master. This is the single seam that lets the screentext
+    stage be entirely optional -- disable the flag (or never run the stage)
+    and renders use the raw master exactly as before, even if a localized
+    master lingers in scratch from an earlier experiment."""
+    localized = localized_master_path(scratch_dir)
+    if localized.exists() and get_config().screentext_enabled:
+        return localized
+    return find_master_video(project_dir)
+
+
 def deliverable_paths(project_dir: Path) -> dict:
     """Standard output filenames per cn_workflow.html's Drive structure convention."""
     pid = project_dir.name

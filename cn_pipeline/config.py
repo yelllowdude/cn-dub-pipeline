@@ -64,6 +64,11 @@ class Config:
         if not self.kie_api_key:
             raise ConfigError("KIE_API_KEY is empty in .env")
 
+        # Optional -- only the review stage needs it, so it's not a hard error
+        # at startup. cn_pipeline.frameio raises a clear message if it's missing
+        # when a review command actually runs.
+        self.frameio_token = os.environ.get("FRAMEIO_TOKEN", "")
+
         drive_root = raw.get("drive_root")
         if not drive_root:
             raise ConfigError("config.json is missing 'drive_root'")
@@ -83,6 +88,19 @@ class Config:
         # sub-chunks, and exactly 1 KIE thumbnail clean per video.
         self.max_tts_calls_per_run = int(raw.get("max_tts_calls_per_run", 60))
         self.max_kie_calls_per_run = int(raw.get("max_kie_calls_per_run", 5))
+        # In-screen text localization cleans one region per detected text event,
+        # so it needs its own (larger) budget separate from the thumbnail's
+        # single clean -- a busy video can have dozens of on-screen labels.
+        self.max_screentext_clean_calls_per_run = int(raw.get("max_screentext_clean_calls_per_run", 40))
+
+        # In-screen text localization is EXPERIMENTAL and off by default. Flip
+        # to true in config.json to try it. When false, `screentext` commands
+        # refuse to run and renders always use the raw master -- so the feature
+        # is inert until deliberately switched on, and trivial to abandon.
+        # (To remove it wholesale: delete cn_pipeline/screentext.py, drop the
+        # `screentext` group in cli.py, and revert paths.effective_master to
+        # find_master_video. Nothing else depends on it.)
+        self.screentext_enabled = bool(raw.get("screentext_enabled", False))
 
     def _resolve_ffmpeg(self, override: str | None) -> str:
         if override:

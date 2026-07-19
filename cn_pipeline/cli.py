@@ -18,7 +18,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from cn_pipeline import align, dub, paths, render, subtitles, thumbnail
+from cn_pipeline import align, dub, frameio, paths, render, screentext, subtitles, thumbnail
 from cn_pipeline.config import ConfigError, get_config
 
 
@@ -288,18 +288,18 @@ def cmd_thumb_render(args):
 def cmd_render_ensub(args):
     scratch = _scratch(args.project_id)
     project_dir = paths.resolve_project_dir(args.project_id)
-    master = paths.find_master_video(project_dir)
+    master = paths.effective_master(project_dir, scratch)
     out = paths.deliverable_paths(project_dir)
     if not _stage_gate(args, [out["ensub_mp4"]], [master, scratch / "bilingual_ensub.srt"]):
         return
     render.render_ensub(master, scratch / "bilingual_ensub.srt", out["ensub_mp4"], scratch / "render_ensub.log")
-    print(f"wrote {out['ensub_mp4']}")
+    print(f"wrote {out['ensub_mp4']} (video source: {master.name})")
 
 
 def cmd_render_cndub(args):
     scratch = _scratch(args.project_id)
     project_dir = paths.resolve_project_dir(args.project_id)
-    master = paths.find_master_video(project_dir)
+    master = paths.effective_master(project_dir, scratch)
     out = paths.deliverable_paths(project_dir)
     mixed_path = scratch / "dub_master_mixed.wav"
     zh_vo = mixed_path if mixed_path.exists() else scratch / "dub_master_padded.wav"
@@ -307,7 +307,146 @@ def cmd_render_cndub(args):
         return
     render.render_cndub(master, zh_vo, out["bilingual_cndub_srt"],
                          out["cndub_mp4"], scratch / "render_cndub.log")
-    print(f"wrote {out['cndub_mp4']} (audio source: {zh_vo.name})")
+    print(f"wrote {out['cndub_mp4']} (audio source: {zh_vo.name}, video source: {master.name})")
+
+
+def _require_screentext_enabled():
+    if not get_config().screentext_enabled:
+        sys.exit(
+            "In-screen text localization is disabled (experimental). Set "
+            '"screentext_enabled": true in config.json to try it. Renders '
+            "use the raw master until then."
+        )
+
+
+def cmd_screentext_detect(args):
+    _require_screentext_enabled()
+    scratch = _scratch(args.project_id)
+    project_dir = paths.resolve_project_dir(args.project_id)
+    master = paths.find_master_video(project_dir)  # detect on the RAW master, always
+    events_json = scratch / "screentext" / "screentext_events.json"
+    if not _stage_gate(args, [events_json], [master]):
+        return
+    result = screentext.detect_text_events(master, scratch)
+    print(f"detected {result['event_count']} on-screen text event(s), "
+          f"{result['unstable_count']} unstable (moving -- will be skipped + listed)")
+    print(f"wrote {events_json}")
+    print("Next: translate each event's `text` to Chinese (live judgment, glossary-checked, "
+          "same as subtitles), write a JSON array of strings in the same order, then "
+          "`screentext ingest-translation`. Review unstable events by eye -- their in-frame "
+          "text moves, so a static patch can't cover them.")
+
+
+def cmd_screentext_ingest_translation(args):
+    _require_screentext_enabled()
+    scratch = _scratch(args.project_id)
+    data = screentext.load_events(scratch)
+    zh = json.loads(Path(args.zh_json).read_text(encoding="utf-8"))
+    n = len(data["events"])
+    if len(zh) != n:
+        sys.exit(f"translation has {len(zh)} lines, {n} text events detected -- must match 1:1")
+    shutil.copy(args.zh_json, scratch / "screentext" / "screentext_zh.json")
+    print(f"ingested {len(zh)} translated on-screen strings")
+
+
+def cmd_screentext_localize(args):
+    _require_screentext_enabled()
+    scratch = _scratch(args.project_id)
+    project_dir = paths.resolve_project_dir(args.project_id)
+    master = paths.find_master_video(project_dir)  # composite onto the RAW master
+    st_dir = scratch / "screentext"
+    out_path = paths.localized_master_path(scratch)
+    inputs = [master, st_dir / "screentext_events.json", st_dir / "screentext_zh.json"]
+    if not _stage_gate(args, [out_path], inputs):
+        return
+    data = screentext.load_events(scratch)
+    zh = json.loads((st_dir / "screentext_zh.json").read_text(encoding="utf-8"))
+    result = screentext.build_localized_master(
+        master, data["events"], zh, data["frame_w"], data["frame_h"], scratch, out_path,
+    )
+    print(json.dumps({k: v for k, v in result.items() if k != "skipped_unstable"}, indent=2))
+    if result["skipped_unstable"]:
+        print(f"\n{len(result['skipped_unstable'])} moving/unstable event(s) NOT localized "
+              "-- static patch can't cover in-frame motion. Resolve by hand if they matter:")
+        for s in result["skipped_unstable"]:
+            print(f"  [{s['idx']}] @{s['start_ms']}ms drift={s['drift_frac']} "
+                  f"\"{s['text']}\" -> \"{s['zh']}\"")
+    if not result["localized"]:
+        print("\nNo localized master written -- renders will use the raw master unchanged.")
+
+
+def cmd_review_submit(args):
+    """Upload the finished cndub to Frame.io for native-speaker review and
+    print the share link (paste into the Chinese DB's `Frame.io link` field)."""
+    project_dir = paths.resolve_project_dir(args.project_id)
+    out = paths.deliverable_paths(project_dir)
+    if not out["cndub_mp4"].exists():
+        sys.exit(f"{out['cndub_mp4'].name} not found -- render it before submitting for review")
+    result = frameio._api_upload_for_review(out["cndub_mp4"])
+    scratch = _scratch(args.project_id)
+    (scratch / "review_link.txt").write_text(result.get("review_link", ""), encoding="utf-8")
+    print(json.dumps(result, indent=2))
+
+
+def cmd_review_fetch(args):
+    """Pull the reviewer's time-coded comments, resolve each to its cue, and
+    classify into auto-fixable vs needs-human. Works live (--asset-id) or from
+    an exported comments file (--comments-json)."""
+    scratch = _scratch(args.project_id)
+    project_dir = paths.resolve_project_dir(args.project_id)
+    out = paths.deliverable_paths(project_dir)
+    cues = frameio.parse_cndub_cues(out["bilingual_cndub_srt"])
+    comments = frameio.fetch_comments(
+        args.asset_id, Path(args.comments_json) if args.comments_json else None
+    )
+    report = frameio.build_review_report(comments, cues)
+    (scratch / "review_report.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    lines = [f"# Review report — {args.project_id}", "",
+             f"{report['comment_count']} comment(s): "
+             f"{report['auto_count']} auto-fixable, {report['human_count']} need a human", ""]
+    if report["auto_fixable"]:
+        lines.append("## Auto-fixable (term/typo with a concrete replacement)")
+        for e in report["auto_fixable"]:
+            lines.append(f"- cue {e['cue_idx']}: `{e['replacement']['old']}` → "
+                         f"`{e['replacement']['new']}`  — {e['author']}: \"{e['text']}\"")
+        lines.append("")
+    if report["needs_human"]:
+        lines.append("## Needs a human")
+        for e in report["needs_human"]:
+            loc = f"cue {e['cue_idx']}" if e["cue_idx"] else "unresolved"
+            lines.append(f"- [{e['category']}] {loc}: \"{e['text']}\" — {e.get('human_reason','')}")
+    (scratch / "review_report.md").write_text("\n".join(lines), encoding="utf-8")
+    print(f"{report['comment_count']} comment(s): {report['auto_count']} auto-fixable, "
+          f"{report['human_count']} need a human")
+    print(f"wrote {scratch / 'review_report.json'} and review_report.md")
+
+
+def cmd_review_apply(args):
+    """Apply the auto-fixable term/typo swaps to zh.json (backing up the old
+    one), and print the human queue + which stages to re-run."""
+    scratch = _scratch(args.project_id)
+    report = json.loads((scratch / "review_report.json").read_text(encoding="utf-8"))
+    zh_path = scratch / "zh.json"
+    zh = json.loads(zh_path.read_text(encoding="utf-8"))
+    new_zh, changelog = frameio.apply_auto_fixes(report, zh)
+
+    applied = [c for c in changelog if c["status"] == "applied"]
+    if applied:
+        shutil.copy(zh_path, scratch / "zh.pre_review.json")  # keep the pre-fix translation
+        zh_path.write_text(json.dumps(new_zh, ensure_ascii=False, indent=2), encoding="utf-8")
+    for c in changelog:
+        print(json.dumps(c, ensure_ascii=False))
+    print(f"\napplied {len(applied)} fix(es) to zh.json" if applied else "\nno auto-fixes applied")
+    if applied:
+        print("Re-run to propagate (SKIP_OK redoes only what's downstream of zh.json):")
+        print("  cn-pipeline subtitles build-srt --project-id {id}")
+        print("  cn-pipeline dub generate --project-id {id}   # text cache re-buys only changed chunks")
+        print("  ...then dub finalize -> tighten -> mix-me -> align align-dub -> render (ensub/cndub/verify)")
+    if report["needs_human"]:
+        print(f"\n{report['human_count']} comment(s) still need a human (see review_report.md) -- "
+              "pacing/sync and anything without a concrete replacement are never auto-applied.")
 
 
 def cmd_render_verify(args):
@@ -369,10 +508,23 @@ def main():
     add(thumb_group, "clean", cmd_thumb_clean)
     add(thumb_group, "render", cmd_thumb_render)
 
+    st_group = sub.add_parser("screentext").add_subparsers(dest="cmd", required=True)
+    add(st_group, "detect", cmd_screentext_detect)
+    st_ingest = add(st_group, "ingest-translation", cmd_screentext_ingest_translation)
+    st_ingest.add_argument("--zh-json", required=True, dest="zh_json")
+    add(st_group, "localize", cmd_screentext_localize)
+
     render_group = sub.add_parser("render").add_subparsers(dest="cmd", required=True)
     add(render_group, "ensub", cmd_render_ensub)
     add(render_group, "cndub", cmd_render_cndub)
     add(render_group, "verify", cmd_render_verify)
+
+    review_group = sub.add_parser("review").add_subparsers(dest="cmd", required=True)
+    add(review_group, "submit", cmd_review_submit)
+    review_fetch = add(review_group, "fetch", cmd_review_fetch)
+    review_fetch.add_argument("--asset-id", dest="asset_id", default=None)
+    review_fetch.add_argument("--comments-json", dest="comments_json", default=None)
+    add(review_group, "apply", cmd_review_apply)
 
     args = p.parse_args()
     try:

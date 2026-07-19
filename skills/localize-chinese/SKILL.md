@@ -76,6 +76,30 @@ chunks whose lines actually changed — never trust or hand-edit the files in
    cn-pipeline subtitles build-srt --project-id {id}
    ```
 
+   **In-screen text localization — OPTIONAL, experimental, off by default.**
+   Only if `config.json` has `"screentext_enabled": true`. This translates
+   baked-in text *inside the video frames* (lower-thirds, labels, on-screen
+   graphics) into Chinese, so the picture itself is localized — not just the
+   subtitles. It handles fixed-position overlay text and *flags* moving text
+   for a human rather than smearing a stale patch across it (see
+   `cn_pipeline/screentext.py`'s docstring for the boundary). Run:
+   ```
+   cn-pipeline screentext detect --project-id {id}
+   ```
+   Read `runs/{id}/screentext/screentext_events.json`, translate each event's
+   `text` to Chinese (live, glossary-checked, same discipline as the
+   subtitles), write a JSON array of strings in the same order, then:
+   ```
+   cn-pipeline screentext ingest-translation --project-id {id} --zh-json path/to/screentext_zh.json
+   cn-pipeline screentext localize --project-id {id}
+   ```
+   `localize` composites Chinese patches onto the master → a localized master
+   the render stage (step 8) picks up automatically. It prints any unstable
+   (moving) events it skipped — decide those by hand. If the flag is off, skip
+   this entirely; renders use the raw master. **This is a "see how it works"
+   feature: if the output looks wrong, set the flag back to false and the
+   pipeline reverts with zero other changes.**
+
 4. **Title pick — live.** Generate 3 CN title options per `cn_workflow.html`'s
    meta-pack rules, pick one (present to the user if they're around, otherwise
    apply the same judgment yourself), format the winner into the V1/V2
@@ -147,7 +171,31 @@ chunks whose lines actually changed — never trust or hand-edit the files in
    upstream broke — diagnose it, don't re-render-and-hope past it. The run
    isn't done until it prints PASS.
 
-9. **Hand off.** Everything from here — uploading to Bilibili, scheduling,
+9. **Native-speaker review — Frame.io.** Submit the finished dub for a native
+   speaker to review with time-coded comments, then fold their feedback back
+   in. Submit:
+   ```
+   cn-pipeline review submit --project-id {id}
+   ```
+   Paste the returned link into the Chinese DB's `Frame.io link` field and set
+   `Status: In review`. (Until the Frame.io upload API is verified, `submit`
+   will tell you to upload the `{id}_cndub.mp4` by hand and share it — the rest
+   of the loop works regardless.) When the reviewer is done, pull and apply:
+   ```
+   cn-pipeline review fetch --project-id {id} --asset-id <id>      # or --comments-json <exported.json>
+   cn-pipeline review apply --project-id {id}
+   ```
+   `fetch` resolves every comment to its exact cue and splits them into
+   auto-fixable (a term/typo with a concrete replacement) vs needs-a-human
+   (pacing, sync, anything vague) — written to `review_report.md`. `apply`
+   makes only the mechanical fixes to `zh.json`, per-cue, never a blanket
+   swap, and tells you which stages to re-run (the SKIP_OK gates redo only
+   what's downstream of the edited translation). **Work the needs-a-human
+   queue yourself** — those are judgment calls the tool deliberately won't
+   guess. Re-render, re-submit if the changes were substantial, and only move
+   on once the reviewer signs off.
+
+10. **Hand off.** Everything from here — uploading to Bilibili, scheduling,
    what "good" output looks like on review — is `docs/cn_staff_handoff.html`'s
    job, not this skill's. Write the Notion Chinese DB row (title, description,
    tags, ad-disclosure section if `Contains ads?`) per `cn_workflow.html`'s
