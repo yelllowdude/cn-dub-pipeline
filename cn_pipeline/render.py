@@ -58,6 +58,33 @@ def render_cndub(master_video: Path, zh_vo_wav: Path, bilingual_cndub_srt: Path,
     return out_path
 
 
+DURATION_TOLERANCE_MS = 100  # "within ~0.1s" per cn_workflow.html Stage 5
+
+
+def verify_outputs(master_video: Path, outputs: list[Path]) -> list[dict]:
+    """The Stage 5 close-out gate: both rendered files' durations must match
+    the source video within DURATION_TOLERANCE_MS. A bigger mismatch means
+    something upstream broke -- not something to re-render-and-hope past.
+    Previously a manual "confirm both durations" instruction in SKILL.md;
+    this makes it one command anyone can run and trust."""
+    cfg = get_config()
+    src_ms = probe_duration_ms(cfg.ffmpeg_path, master_video)
+    results = []
+    for p in outputs:
+        if not p.exists():
+            results.append({"file": p.name, "ok": False, "reason": "missing",
+                            "source_ms": round(src_ms)})
+            continue
+        dur_ms = probe_duration_ms(cfg.ffmpeg_path, p)
+        delta_ms = dur_ms - src_ms
+        results.append({
+            "file": p.name, "ok": abs(delta_ms) <= DURATION_TOLERANCE_MS,
+            "duration_ms": round(dur_ms), "source_ms": round(src_ms),
+            "delta_ms": round(delta_ms),
+        })
+    return results
+
+
 def probe_duration_ms(cfg_ffmpeg_path: str, video_path: Path) -> float:
     # swap just the binary name, not a blanket string replace -- ffmpeg-full's
     # own directory name also contains "ffmpeg" and would get mangled otherwise

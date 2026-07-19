@@ -78,6 +78,12 @@ class Config:
         self.whisper_model = raw.get("whisper_model", "small")
         self.ffmpeg_path = self._resolve_ffmpeg(raw.get("ffmpeg_path"))
 
+        # Per-run paid-call caps (see cn_pipeline.spend). Defaults are sized
+        # so a normal run never notices them: ~10-15 TTS chunks + re-split
+        # sub-chunks, and exactly 1 KIE thumbnail clean per video.
+        self.max_tts_calls_per_run = int(raw.get("max_tts_calls_per_run", 60))
+        self.max_kie_calls_per_run = int(raw.get("max_kie_calls_per_run", 5))
+
     def _resolve_ffmpeg(self, override: str | None) -> str:
         if override:
             p = Path(override)

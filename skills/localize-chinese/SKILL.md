@@ -29,6 +29,19 @@ Python environment, `.env`, or `config.json`, stop and tell the user to run
 `cn-pipeline-setup` once first (see README) — don't try to work around a
 missing environment.
 
+Pre-flight also prints the Stage 1 checks it *can't* do mechanically —
+winning title from the Notion source row, thumbnail source, sponsor
+detection. Those are yours; the sponsor check is scheduled explicitly in
+stage 2 below.
+
+**Re-runs are safe by default.** Every mechanical command prints `SKIP_OK`
+and does nothing when its outputs are already up to date; pass `--force` to
+redo a stage, and downstream stages then rerun automatically (their inputs
+are now newer). Paid TTS chunks are cached against the exact text that
+generated them, so a rerun after a translation edit only re-spends on the
+chunks whose lines actually changed — never trust or hand-edit the files in
+`runs/{id}/chunks/` to game this.
+
 ## Stage sequence
 
 1. **Pre-flight** (mechanical) — already run above. Confirms the master
@@ -41,6 +54,16 @@ missing environment.
    cn-pipeline subtitles split-cues --project-id {id}
    ```
    This writes `runs/{id}/segments.json`.
+
+   **Then the sponsor check — live, and it happens here, not at upload.**
+   Scan `segments.json` for sponsor mentions and promo-code patterns, and
+   check the source Notion row's sponsor field. Record the verdict now: it
+   drives the `Contains ads?` checkbox, the sponsor CTA's placement in the
+   description, and the `# CN ad disclosure` section in step 9 (rules in
+   `cn_workflow.html` Stage 2 and the glossary's ad-disclosure boilerplate).
+   This check previously lived only in the rulebook's Stage 1 with no owner
+   in this sequence — a missed check here is a compliance problem, not a
+   formatting one.
 
 3. **Translation — live, not scripted.** Read `runs/{id}/segments.json`,
    translate the whole transcript to Chinese *in context as one document*
@@ -113,14 +136,16 @@ missing environment.
    Writes `{id}_bilingual_cndub.srt`. If it reports more than 1-2 monotonic-clamp
    overlaps fixed, that's worth a second look, not just a pass-through.
 
-8. **Render** (mechanical):
+8. **Render + verify** (mechanical):
    ```
    cn-pipeline render ensub --project-id {id}
    cn-pipeline render cndub --project-id {id}
+   cn-pipeline render verify --project-id {id}
    ```
-   Confirm both output durations match the source video closely (within ~0.1s)
-   before treating the run as done — a bigger mismatch means something
-   upstream broke, not something to re-render-and-hope past.
+   `render verify` is the close-out gate: it fails loudly if either output's
+   duration is off the source by more than ~0.1s. A failure means something
+   upstream broke — diagnose it, don't re-render-and-hope past it. The run
+   isn't done until it prints PASS.
 
 9. **Hand off.** Everything from here — uploading to Bilibili, scheduling,
    what "good" output looks like on review — is `docs/cn_staff_handoff.html`'s
@@ -134,3 +159,9 @@ Check `runs/{id}/*.log` and `runs/{id}/*_log.json` for the stage that failed.
 Don't silently retry a paid stage (TTS generation, the KIE thumbnail call)
 with different parameters hoping it works — flag what happened and why
 before spending more API calls on it.
+
+That rule is now also enforced mechanically: paid calls count against
+per-run caps (`runs/{id}/api_spend.json`, caps in `config.json`), and a
+call past the cap raises instead of spending. If you hit a `SpendCapError`,
+that *is* the flag — report what burned the budget; don't raise the cap or
+delete the counter to push through without the user's say-so.

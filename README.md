@@ -98,7 +98,7 @@ choice, thumbnail wording) that's worth double-checking.
 ```
 .claude-plugin/        plugin.json + marketplace.json — this repo is both
 skills/                 the Claude Code skill that drives cn_pipeline's CLI (plugin-standard location)
-.claude/skills/         same skill, duplicated here for local-dev auto-discovery when you cd into this repo directly
+.claude/skills/         symlink to the same SKILL.md, for local-dev auto-discovery when you cd into this repo directly -- one file, edited in skills/, never two copies to drift
 bin/                    cn-pipeline (CLI wrapper) + cn-pipeline-setup (one-time env setup), both added to PATH when installed as a plugin
 cn_pipeline/            the actual package — one module per pipeline stage concept
 docs/                   cn_workflow.html (rules/thresholds) + cn_staff_handoff.html (upload/schedule)
@@ -122,3 +122,15 @@ Check `runs/{project-id}/*.log` and `*_log.json` first. If a stage fails
 partway, don't just retry blindly — TTS generation and the thumbnail
 cleaning step both cost real API spend per call. Flag it to Wayne if the
 cause isn't obvious from the log.
+
+Two guard rails to know about:
+- **Re-running a stage is safe.** Every command prints `SKIP_OK` and does
+  nothing when its outputs are already up to date; `--force` redoes a stage
+  (and downstream stages then rerun automatically). Paid TTS chunks are
+  cached against the exact text that generated them, so re-runs only spend
+  on what actually changed.
+- **Paid calls are capped per run** (`max_tts_calls_per_run` /
+  `max_kie_calls_per_run` in `config.json`, counter in
+  `runs/{project-id}/api_spend.json`). Hitting the cap means a retry loop
+  or a rerun that should have been cached — that's the flag-it-to-Wayne
+  moment, not a prompt to raise the cap.

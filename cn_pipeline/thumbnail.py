@@ -32,6 +32,7 @@ import requests
 from PIL import Image, ImageDraw, ImageFont
 
 from cn_pipeline.config import get_config
+from cn_pipeline.spend import record_call
 
 KIE_UPLOAD_URL = "https://kieai.redpandaai.co/api/file-base64-upload"
 KIE_CREATE_TASK_URL = "https://api.kie.ai/api/v1/jobs/createTask"
@@ -79,6 +80,8 @@ def clean_source_thumbnail(
         f"behind it so no text or text-shaped artifact remains. Do NOT change "
         f"anything else: {scene_description}. Keep the 16:9 composition."
     )
+    # out_path lives in the run scratch dir; the createTask call is the paid part
+    record_call(out_path.parent, "kie", cfg.max_kie_calls_per_run)
     task = requests.post(
         KIE_CREATE_TASK_URL,
         headers={"Authorization": f"Bearer {cfg.kie_api_key}", "Content-Type": "application/json"},
