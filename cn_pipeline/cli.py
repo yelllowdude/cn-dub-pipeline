@@ -229,13 +229,20 @@ def cmd_align_dub(args):
     actual_ms = {c["idx"]: c["final_ms"] for c in finalize_log["chunks"]}
 
     chunks = dub._chunk_segments(segs, dub.CHUNK_SIZE)
+    # Same timeline finalize used to assemble the audio: lead silence + the
+    # real inter-chunk gaps. Reading with the old gapless accumulation here
+    # would extract each chunk from the wrong offset in the gapped track, so
+    # the burned subtitles would slide off the voice.
+    timeline = dub.chunk_timeline(segs, dub.CHUNK_SIZE)
+    gaps = timeline["gaps"]
     all_cues = []
-    chunk_abs_start = 0
+    chunk_abs_start = timeline["lead_ms"]
     align_dir = scratch / "align_chunks"
     align_dir.mkdir(exist_ok=True)
 
-    for c in chunks:
+    for pos, c in enumerate(chunks):
         idx = c["idx"]
+        chunk_abs_start += gaps[pos]
         chunk_dur = actual_ms[idx]
         zh_slice = zh[c["seg_start"]:c["seg_end"]]
         en_slice = [s["text"] for s in segs[c["seg_start"]:c["seg_end"]]]

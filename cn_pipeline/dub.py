@@ -65,6 +65,40 @@ def _chunk_segments(segments: list[dict], chunk_size: int) -> list[dict]:
     return chunks
 
 
+def chunk_timeline(segments: list[dict], chunk_size: int = CHUNK_SIZE) -> dict:
+    """Where each chunk sits on the ORIGINAL video's timeline.
+
+    A chunk is fitted to its own internal span (first cue start -> last cue
+    end), so concatenating chunks back-to-back drops the leading silence before
+    the first chunk AND every inter-chunk gap (the quiet between one chunk's
+    last cue and the next chunk's first cue). Those dropped gaps accumulate and
+    surface as a lump of trailing silence that `tighten` pads at the end --
+    which slides the whole dub forward relative to the picture. Observed in
+    production (max-strength_2026-03-12: ~3.9s of real inter-chunk gap pushed
+    to the tail, VO drifting against on-screen cuts in the second half).
+
+    Returns {lead_ms, gaps} where lead_ms is the silence before chunk 1 and
+    gaps[i] is the silence to insert BEFORE chunk i (gaps[0] == 0; the lead is
+    handled separately). Both `finalize` (to insert the silence) and
+    `align_dub` (to place cues at the matching offsets) consume this, so the
+    assembled audio and the burned subtitles share one timeline definition and
+    can't drift apart."""
+    chunks = _chunk_segments(segments, chunk_size)
+    bounds = []
+    for c in chunks:
+        first = segments[c["seg_start"]]
+        last = segments[c["seg_end"] - 1]
+        start = parse_srt_time(first["time"].split(" --> ")[0])
+        end = parse_srt_time(last["time"].split(" --> ")[1])
+        bounds.append((start, end))
+
+    lead_ms = bounds[0][0] if bounds else 0
+    gaps = [0]
+    for i in range(1, len(bounds)):
+        gaps.append(max(0, bounds[i][0] - bounds[i - 1][1]))
+    return {"lead_ms": lead_ms, "gaps": gaps}
+
+
 def _tts_call(api_key: str, texts: list[str], scratch_dir: Path) -> bytes:
     cfg = get_config()
     record_call(scratch_dir, "tts", cfg.max_tts_calls_per_run)
@@ -264,15 +298,24 @@ def finalize(segments: list[dict], zh_lines: list[str], scratch_dir: Path, cappe
 
     chunks = _chunk_segments(segments, CHUNK_SIZE)
     last_idx = chunks[-1]["idx"] if chunks else None
-    final_master = AudioSegment.empty()
-    log = {"chunks": []}
+    timeline = chunk_timeline(segments, CHUNK_SIZE)
+    lead_ms, gaps = timeline["lead_ms"], timeline["gaps"]
 
-    for c in chunks:
+    # Anchor the assembly to the original timeline: leading silence before the
+    # first chunk, then the real inter-chunk gap before each subsequent chunk.
+    # Without this the dub loses every gap between chunks and slides forward
+    # against the picture (see chunk_timeline).
+    final_master = AudioSegment.silent(duration=lead_ms) if lead_ms > 0 else AudioSegment.empty()
+    log = {"chunks": [], "lead_ms": lead_ms, "inter_chunk_gap_ms": sum(gaps)}
+
+    for pos, c in enumerate(chunks):
         idx = c["idx"]
+        if gaps[pos] > 0:
+            final_master += AudioSegment.silent(duration=gaps[pos])
         if idx not in capped_chunks:
             clip = AudioSegment.from_wav(chunks_dir / f"{idx:02d}_stretched.wav")
             final_master += clip
-            log["chunks"].append({"idx": idx, "action": "reused", "final_ms": len(clip)})
+            log["chunks"].append({"idx": idx, "action": "reused", "gap_before_ms": gaps[pos], "final_ms": len(clip)})
             continue
 
         rebuilt_path = fix_dir / f"{idx:02d}_rebuilt.wav"
