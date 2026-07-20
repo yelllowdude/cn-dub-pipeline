@@ -405,9 +405,12 @@ def _create_review_share(cfg, account_id: str, file_id: str, name: str):
     .../shares/{id}/assets {"data": {"asset_id": ...}}. Best-effort: on any
     failure returns (None, None) so the caller falls back to the file view_url."""
     try:
+        data = {"name": name, "type": "asset", "access": "public"}
+        if cfg.frameio_share_passphrase:
+            data["passphrase"] = cfg.frameio_share_passphrase
         share = _api(
             "POST", f"/accounts/{account_id}/projects/{cfg.frameio_project_id}/shares", cfg,
-            json={"data": {"name": name, "type": "asset", "access": "public"}},
+            json={"data": data},
         )
         share_id = _first(share, "id")
         url = _first(share, "short_url", "url")

@@ -85,6 +85,10 @@ class Config:
         self.frameio_refresh_token = os.environ.get("FRAMEIO_REFRESH_TOKEN", "")
         self.frameio_account_id = raw.get("frameio_account_id", "")
         self.frameio_project_id = raw.get("frameio_project_id", "")
+        # Optional passphrase for review shares. When set, the public f.io link
+        # requires it before an (external) reviewer can view/comment. From .env
+        # since it gates access. Empty -> link is open to anyone who has it.
+        self.frameio_share_passphrase = os.environ.get("FRAMEIO_SHARE_PASSPHRASE", "")
         # Must be HTTPS and match a redirect URI pattern registered on the Adobe
         # Web App credential. The `review auth` flow only reads the code back
         # from the browser's address bar, so nothing needs to actually serve it.
