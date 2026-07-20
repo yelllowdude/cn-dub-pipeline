@@ -380,51 +380,85 @@ def _project_root_folder(cfg, account_id: str) -> str:
     return root
 
 
+def _put_upload_part(url: str, chunk: bytes, media_type: str) -> None:
+    """PUT one presigned S3 part. The presigned URL signs a specific set of
+    headers (X-Amz-SignedHeaders); we must send exactly those, or S3 403s. In
+    practice Frame.io signs content-type;host;x-amz-acl -- we set the two we can."""
+    from urllib.parse import urlparse, parse_qs
+    signed = parse_qs(urlparse(url).query).get("X-Amz-SignedHeaders", [""])[0].lower()
+    headers = {}
+    if "content-type" in signed:
+        headers["Content-Type"] = media_type
+    if "x-amz-acl" in signed:
+        headers["x-amz-acl"] = "private"
+    put = requests.put(url, data=chunk, headers=headers, timeout=600)
+    if put.status_code not in (200, 201, 204):
+        raise RuntimeError(f"part PUT failed: {put.status_code} {put.text[:200]}")
+
+
+def _try_create_review_share(cfg, account_id: str, file_id: str, name: str):
+    """Best-effort public review share. V4 restricted share-link automation and
+    the create body's `type` discriminator is undocumented, so this may fail;
+    callers fall back to the file's own view_url. Returns (share_id, url) or
+    (None, None). If/when the correct body is confirmed, only this fn changes."""
+    try:
+        share = _api(
+            "POST", f"/accounts/{account_id}/projects/{cfg.frameio_project_id}/shares", cfg,
+            json={"data": {"name": name, "type": "review"}},
+        )
+    except Exception:
+        return None, None
+    share_id = _first(share, "id")
+    url = _first(share, "short_url", "url", "review_link", "link")
+    if share_id and file_id:
+        try:
+            _api("POST", f"/accounts/{account_id}/shares/{share_id}/assets", cfg,
+                 json={"data": {"asset_id": file_id}})
+        except Exception:
+            pass
+    return share_id, url
+
+
 def _api_upload_for_review(video_path: Path) -> dict:
-    """Upload the cndub to Frame.io V4 and open a review share.
-    Returns {asset_id, review_link, share_id}. Flow:
-      1) create file (local_upload) -> presigned S3 part URLs
-      2) PUT each part
-      3) create a review share on the project and attach the file
-    """
+    """Upload the cndub to Frame.io V4 for native-speaker review.
+    Returns {asset_id, review_link, view_url, share_id}. Flow:
+      1) create file (local_upload) -> presigned S3 part URLs (+ the file view_url)
+      2) PUT each part to S3
+      3) try to open a public review share; fall back to the file's view_url
+    review_link is what to paste into Notion: the public share URL when the API
+    allows it, otherwise the view_url (opens the file for anyone with workspace
+    access -- fine for internal reviewers)."""
     cfg = get_config()
     account_id = _account_id(cfg)
     folder_id = _project_root_folder(cfg, account_id)
     size = video_path.stat().st_size
-    media_type = "video/mp4"
 
     created = _api(
         "POST", f"/accounts/{account_id}/folders/{folder_id}/files/local_upload", cfg,
-        json={"data": {"name": video_path.name, "file_size": size, "media_type": media_type}},
+        json={"data": {"name": video_path.name, "file_size": size}},
     )
     file_id = _first(created, "id")
+    media_type = _first(created, "media_type") or "video/mp4"
+    view_url = _first(created, "view_url") or ""
     parts = _first(created, "upload_urls", "uploads", default=[])
     if not file_id or not parts:
         raise RuntimeError(f"unexpected local_upload response: {json.dumps(created)[:400]}")
 
-    # PUT each presigned part. Use the per-part size the API returns when
-    # present; otherwise split the file evenly across the returned URLs.
+    # PUT each presigned part; use the per-part size the API returns.
     with open(video_path, "rb") as fh:
-        n = len(parts)
-        even = -(-size // n)  # ceil division
-        for i, part in enumerate(parts):
-            url = part["url"] if isinstance(part, dict) else part
+        for part in parts:
             psize = part.get("size") if isinstance(part, dict) else None
-            chunk = fh.read(psize) if psize else fh.read(even)
-            put = requests.put(url, data=chunk, headers={"Content-Type": media_type}, timeout=600)
-            if put.status_code not in (200, 201, 204):
-                raise RuntimeError(f"chunk {i + 1}/{n} PUT failed: {put.status_code} {put.text[:200]}")
+            url = part["url"] if isinstance(part, dict) else part
+            _put_upload_part(url, fh.read(psize) if psize else fh.read(), media_type)
 
-    share = _api(
-        "POST", f"/accounts/{account_id}/projects/{cfg.frameio_project_id}/shares", cfg,
-        json={"data": {"name": f"CN dub review — {video_path.stem}", "type": "review"}},
-    )
-    share_id = _first(share, "id")
-    review_link = _first(share, "short_url", "url", "review_link", "link")
-    if share_id:
-        _api("POST", f"/accounts/{account_id}/shares/{share_id}/assets", cfg,
-             json={"data": {"asset_id": file_id}})
-    return {"asset_id": file_id, "share_id": share_id, "review_link": review_link or ""}
+    share_id, share_url = _try_create_review_share(
+        cfg, account_id, file_id, f"CN dub review — {video_path.stem}")
+    return {
+        "asset_id": file_id,
+        "share_id": share_id,
+        "review_link": share_url or view_url,
+        "view_url": view_url,
+    }
 
 
 def _api_file_fps(cfg, account_id: str, file_id: str):
