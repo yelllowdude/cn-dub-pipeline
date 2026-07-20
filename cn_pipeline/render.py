@@ -95,3 +95,23 @@ def probe_duration_ms(cfg_ffmpeg_path: str, video_path: Path) -> float:
         capture_output=True, text=True, check=True,
     )
     return float(result.stdout.strip()) * 1000
+
+
+def probe_fps(cfg_ffmpeg_path: str, video_path: Path) -> float | None:
+    """Frames per second as a float, or None if it can't be read. Frame.io
+    comment timestamps are framestamps, so review-fetch needs this to convert
+    them to milliseconds. r_frame_rate comes back as a rational like '30000/1001'."""
+    ffprobe = str(Path(cfg_ffmpeg_path).with_name("ffprobe"))
+    try:
+        result = subprocess.run(
+            [ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries",
+             "stream=r_frame_rate", "-of", "default=noprint_wrappers=1:nokey=1", str(video_path)],
+            capture_output=True, text=True, check=True,
+        )
+        raw = result.stdout.strip()
+        if "/" in raw:
+            num, den = raw.split("/", 1)
+            return float(num) / float(den) if float(den) else None
+        return float(raw) if raw else None
+    except (subprocess.CalledProcessError, ValueError, ZeroDivisionError):
+        return None

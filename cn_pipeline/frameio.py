@@ -479,13 +479,16 @@ def _api_file_fps(cfg, account_id: str, file_id: str):
         return None
 
 
-def _api_fetch_comments(asset_id: str) -> list[dict]:
+def _api_fetch_comments(asset_id: str, fps: float | None = None) -> list[dict]:
     """Pull comments for a file and normalize them. In V4 a comment's
-    `timestamp` is a framestamp (1-based), so we fetch the file's fps to convert
-    to ms. Follows `next` pagination if present."""
+    `timestamp` is a framestamp (1-based), so an fps is needed to convert to ms.
+    Frame.io's file object doesn't expose fps, so callers pass it (probed from
+    the local cndub); we only fall back to the API metadata if none is given.
+    Follows `next` pagination if present."""
     cfg = get_config()
     account_id = _account_id(cfg)
-    fps = _api_file_fps(cfg, account_id, asset_id)
+    if fps is None:
+        fps = _api_file_fps(cfg, account_id, asset_id)
     out, path = [], f"/accounts/{account_id}/files/{asset_id}/comments"
     while path:
         payload = _api("GET", path, cfg)
@@ -540,10 +543,12 @@ def load_comments_json(path: Path) -> list[dict]:
     return [_normalize_comment(c) for c in data]
 
 
-def fetch_comments(asset_id: str | None, comments_json: Path | None) -> list[dict]:
-    """Offline export if given, else the live API."""
+def fetch_comments(asset_id: str | None, comments_json: Path | None,
+                   fps: float | None = None) -> list[dict]:
+    """Offline export if given, else the live API. fps (probed from the local
+    cndub) converts V4 framestamps to ms; ignored for offline exports."""
     if comments_json:
         return load_comments_json(comments_json)
     if not asset_id:
         raise ValueError("need either --asset-id (live) or --comments-json (offline)")
-    return _api_fetch_comments(asset_id)
+    return _api_fetch_comments(asset_id, fps=fps)

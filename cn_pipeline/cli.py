@@ -425,8 +425,14 @@ def cmd_review_fetch(args):
     project_dir = paths.resolve_project_dir(args.project_id)
     out = paths.deliverable_paths(project_dir)
     cues = frameio.parse_cndub_cues(out["bilingual_cndub_srt"])
+    # Live V4 comments carry a framestamp, not seconds -- probe the local cndub's
+    # fps to convert. (Frame.io's file object doesn't expose fps.) Offline exports
+    # ignore fps.
+    fps = None
+    if not args.comments_json and out["cndub_mp4"].exists():
+        fps = render.probe_fps(get_config().ffmpeg_path, out["cndub_mp4"])
     comments = frameio.fetch_comments(
-        args.asset_id, Path(args.comments_json) if args.comments_json else None
+        args.asset_id, Path(args.comments_json) if args.comments_json else None, fps=fps
     )
     report = frameio.build_review_report(comments, cues)
     (scratch / "review_report.json").write_text(
