@@ -89,20 +89,25 @@ def effective_master(project_dir: Path, scratch_dir: Path) -> Path:
     return find_master_video(project_dir)
 
 
-def deliverable_paths(project_dir: Path) -> dict:
-    """Standard output filenames per cn_workflow.html's Drive structure convention."""
+def deliverable_paths(project_dir: Path, version: str = "") -> dict:
+    """Standard output filenames per cn_workflow.html's Drive structure convention.
+
+    `version` (e.g. "v2") suffixes every deliverable so a revision produced from
+    review feedback never overwrites the previous cut -- {id}_cndub.mp4 stays,
+    {id}_cndub_v2.mp4 is written alongside it. Empty version = the base names."""
     pid = project_dir.name
     out = cn_output_dir(project_dir)
+    suf = f"_{version}" if version else ""
     return {
-        "master": out / f"{pid}_master.mp4",
-        "en_srt": out / f"{pid}_en.srt",
-        "zh_srt": out / f"{pid}_zh.srt",
-        "bilingual_ensub_srt": out / f"{pid}_bilingual_ensub.srt",
-        "bilingual_cndub_srt": out / f"{pid}_bilingual_cndub.srt",
-        "zh_vo_wav": out / f"{pid}_zh_vo.wav",
-        "ensub_mp4": out / f"{pid}_ensub.mp4",
-        "cndub_mp4": out / f"{pid}_cndub.mp4",
-        "cover_jpg": out / f"{pid}_cover.jpg",
-        "publish_kit": out / "publish_kit.md",
-        "run_log": out / "run_log.md",
+        "master": out / f"{pid}_master{suf}.mp4",
+        "en_srt": out / f"{pid}_en{suf}.srt",
+        "zh_srt": out / f"{pid}_zh{suf}.srt",
+        "bilingual_ensub_srt": out / f"{pid}_bilingual_ensub{suf}.srt",
+        "bilingual_cndub_srt": out / f"{pid}_bilingual_cndub{suf}.srt",
+        "zh_vo_wav": out / f"{pid}_zh_vo{suf}.wav",
+        "ensub_mp4": out / f"{pid}_ensub{suf}.mp4",
+        "cndub_mp4": out / f"{pid}_cndub{suf}.mp4",
+        "cover_jpg": out / f"{pid}_cover{suf}.jpg",
+        "publish_kit": out / f"publish_kit{suf}.md",
+        "run_log": out / f"run_log{suf}.md",
     }

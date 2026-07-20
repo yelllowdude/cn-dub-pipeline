@@ -52,6 +52,24 @@ def _load_config() -> dict:
     return json.loads(CONFIG_PATH.read_text())
 
 
+def save_env_var(key: str, value: str) -> Path:
+    """Persist KEY=value into the data-dir .env, replacing any existing line.
+    Used by the one-time auth flows (Frame.io, YouTube) to store refresh tokens
+    so later runs authenticate unattended."""
+    lines = ENV_PATH.read_text(encoding="utf-8").splitlines() if ENV_PATH.exists() else []
+    out, found = [], False
+    for ln in lines:
+        if ln.startswith(f"{key}="):
+            out.append(f"{key}={value}")
+            found = True
+        else:
+            out.append(ln)
+    if not found:
+        out.append(f"{key}={value}")
+    ENV_PATH.write_text("\n".join(out) + "\n", encoding="utf-8")
+    return ENV_PATH
+
+
 class Config:
     def __init__(self):
         _load_env()
@@ -64,10 +82,49 @@ class Config:
         if not self.kie_api_key:
             raise ConfigError("KIE_API_KEY is empty in .env")
 
-        # Optional -- only the review stage needs it, so it's not a hard error
-        # at startup. cn_pipeline.frameio raises a clear message if it's missing
-        # when a review command actually runs.
+        # Frame.io V4 review integration. All optional at startup -- only the
+        # `review` stage needs them, and cn_pipeline.frameio raises a specific
+        # message if a required one is missing when a review command runs.
+        #
+        # Auth modes, checked in this order by cn_pipeline.frameio._access_token:
+        #   1. User Authentication (OAuth Web App) refresh token: set
+        #      FRAMEIO_CLIENT_ID + FRAMEIO_CLIENT_SECRET + FRAMEIO_REFRESH_TOKEN.
+        #      Get the refresh token once via `cn-pipeline review auth` (browser
+        #      sign-in). The code then refreshes access tokens unattended.
+        #   2. OAuth Server-to-Server (client_credentials): FRAMEIO_CLIENT_ID +
+        #      FRAMEIO_CLIENT_SECRET only. Cleanest, but the S2S credential needs
+        #      an Adobe Admin Console license many orgs don't have.
+        #   3. Static access token: paste a V4 access token as FRAMEIO_TOKEN
+        #      (simplest, but expires ~24h and must be re-pasted).
+        # Account/project ids and the redirect URI are not secret -> config.json.
         self.frameio_token = os.environ.get("FRAMEIO_TOKEN", "")
+        self.frameio_client_id = os.environ.get("FRAMEIO_CLIENT_ID", "")
+        self.frameio_client_secret = os.environ.get("FRAMEIO_CLIENT_SECRET", "")
+        self.frameio_refresh_token = os.environ.get("FRAMEIO_REFRESH_TOKEN", "")
+        self.frameio_account_id = raw.get("frameio_account_id", "")
+        self.frameio_project_id = raw.get("frameio_project_id", "")
+        # Optional passphrase for review shares. When set, the public f.io link
+        # requires it before an (external) reviewer can view/comment. From .env
+        # since it gates access. Empty -> link is open to anyone who has it.
+        self.frameio_share_passphrase = os.environ.get("FRAMEIO_SHARE_PASSPHRASE", "")
+
+        # YouTube publish (Chinese channel, yellowdude.zh@gmail.com). Same shape
+        # as the Frame.io auth: a Desktop OAuth client's id/secret plus a refresh
+        # token minted once via `cn-pipeline publish auth` (browser sign-in AS the
+        # channel account). All optional at startup -- only `publish` needs them.
+        self.youtube_client_id = os.environ.get("YOUTUBE_CLIENT_ID", "")
+        self.youtube_client_secret = os.environ.get("YOUTUBE_CLIENT_SECRET", "")
+        self.youtube_refresh_token = os.environ.get("YOUTUBE_REFRESH_TOKEN", "")
+        # Must be HTTPS and match a redirect URI pattern registered on the Adobe
+        # Web App credential. The `review auth` flow only reads the code back
+        # from the browser's address bar, so nothing needs to actually serve it.
+        self.frameio_redirect_uri = raw.get("frameio_redirect_uri", "https://localhost/redirect/")
+        # IMS scopes. offline_access is REQUIRED to receive a refresh token in
+        # the User Authentication flow. Overridable per integration.
+        self.frameio_ims_scope = raw.get(
+            "frameio_ims_scope",
+            "openid,AdobeID,email,profile,offline_access,additional_info.roles",
+        )
 
         drive_root = raw.get("drive_root")
         if not drive_root:
@@ -82,6 +139,11 @@ class Config:
 
         self.whisper_model = raw.get("whisper_model", "small")
         self.ffmpeg_path = self._resolve_ffmpeg(raw.get("ffmpeg_path"))
+
+        # Gain (dB) applied to the music/effects bed when `dub mix-me` lays it
+        # under the Chinese VO. Tunable in config.json without a code change;
+        # +6 dB is ~2x louder. Default -4 keeps it under the voice.
+        self.me_gain_db = float(raw.get("me_gain_db", -4.0))
 
         # Per-run paid-call caps (see cn_pipeline.spend). Defaults are sized
         # so a normal run never notices them: ~10-15 TTS chunks + re-split

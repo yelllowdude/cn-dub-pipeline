@@ -18,7 +18,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from cn_pipeline import align, dub, frameio, paths, render, screentext, subtitles, thumbnail
+from cn_pipeline import align, dub, frameio, paths, publish, render, screentext, subtitles, thumbnail
 from cn_pipeline.config import ConfigError, get_config
 
 
@@ -207,7 +207,8 @@ def cmd_dub_mix_me(args):
     out_path = scratch / "dub_master_mixed.wav"
     if not _stage_gate(args, [out_path], [scratch / "dub_master_padded.wav", me_wav]):
         return
-    result = dub.mix_me(scratch / "dub_master_padded.wav", me_wav, out_path)
+    result = dub.mix_me(scratch / "dub_master_padded.wav", me_wav, out_path,
+                        me_gain_db=get_config().me_gain_db)
     print(json.dumps(result, indent=2))
     print(f"wrote {out_path}")
 
@@ -216,7 +217,7 @@ def cmd_align_dub(args):
     """Forced-align the finished dub audio back onto cue text -> bilingual_cndub.srt."""
     scratch = _scratch(args.project_id)
     project_dir = paths.resolve_project_dir(args.project_id)
-    out = paths.deliverable_paths(project_dir)
+    out = paths.deliverable_paths(project_dir, args.version)
     inputs = [scratch / "dub_master_final.wav", scratch / "finalize_log.json", scratch / "zh.json"]
     if not _stage_gate(args, [out["bilingual_cndub_srt"]], inputs):
         return
@@ -307,7 +308,7 @@ def cmd_render_cndub(args):
     scratch = _scratch(args.project_id)
     project_dir = paths.resolve_project_dir(args.project_id)
     master = paths.effective_master(project_dir, scratch)
-    out = paths.deliverable_paths(project_dir)
+    out = paths.deliverable_paths(project_dir, args.version)
     mixed_path = scratch / "dub_master_mixed.wav"
     zh_vo = mixed_path if mixed_path.exists() else scratch / "dub_master_padded.wav"
     if not _stage_gate(args, [out["cndub_mp4"]], [master, zh_vo, out["bilingual_cndub_srt"]]):
@@ -315,6 +316,50 @@ def cmd_render_cndub(args):
     render.render_cndub(master, zh_vo, out["bilingual_cndub_srt"],
                          out["cndub_mp4"], scratch / "render_cndub.log")
     print(f"wrote {out['cndub_mp4']} (audio source: {zh_vo.name}, video source: {master.name})")
+
+
+def cmd_publish_auth(args):
+    """One-time YouTube sign-in for the Chinese channel. Run it with no flags to
+    get the URL; sign in AS yellowdude.zh@gmail.com; re-run with --redirect-url
+    to store the refresh token."""
+    cfg = get_config()
+    if not args.redirect_url:
+        url = publish.build_authorize_url(cfg)
+        print("1) Open this URL and sign in as the CHINESE channel account "
+              "(yellowdude.zh@gmail.com -- not your own):\n")
+        print(f"   {url}\n")
+        print("2) After consent, the browser lands on a http://localhost/?code=... page")
+        print("   that won't load -- copy the FULL URL from the address bar.")
+        print("3) Re-run:  cn-pipeline publish auth --redirect-url '<paste it>'")
+        return
+    tok = publish.exchange_code_for_tokens(cfg, args.redirect_url)
+    path = publish.save_refresh_token(tok["refresh_token"])
+    print(f"Saved YOUTUBE_REFRESH_TOKEN to {path}. YouTube publish is ready.")
+
+
+def cmd_publish_youtube(args):
+    """Upload the CNdub to the Chinese YouTube channel as a PRIVATE draft and
+    print the video link (goes into the Chinese DB's `CNdub YT link`)."""
+    project_dir = paths.resolve_project_dir(args.project_id)
+    out = paths.deliverable_paths(project_dir, args.version)
+    if not out["cndub_mp4"].exists():
+        sys.exit(f"{out['cndub_mp4'].name} not found -- render it before publishing")
+    if not args.title:
+        sys.exit("--title is required (use the Notion row's V2/中配 title)")
+    description = Path(args.description_file).read_text(encoding="utf-8") if args.description_file else ""
+    tags = [t.strip() for t in args.tags.split(",") if t.strip()] if args.tags else None
+    result = publish.upload_youtube_draft(out["cndub_mp4"], args.title, description, tags)
+    print(json.dumps(result, indent=2))
+    print(f"\nPrivate draft uploaded. Link for the Chinese DB's `CNdub YT link`:\n  {result['link']}")
+    print("Flip it public in YouTube Studio when ready.")
+
+
+def cmd_publish_bilibili(args):
+    sys.exit(
+        "Bilibili publish is not implemented yet -- the team is waiting on official "
+        "API access from Bilibili. Once granted, this command will upload both the "
+        "ENsub and CNdub drafts and print their BV links."
+    )
 
 
 def _require_screentext_enabled():
@@ -382,17 +427,73 @@ def cmd_screentext_localize(args):
         print("\nNo localized master written -- renders will use the raw master unchanged.")
 
 
+def cmd_review_auth(args):
+    """One-time Frame.io V4 sign-in (User Authentication). Without --redirect-url,
+    prints the IMS authorize URL to open; with it, exchanges the returned code for
+    a refresh token and saves it to .env so future runs authenticate unattended."""
+    cfg = get_config()
+    if not args.redirect_url:
+        url = frameio.build_authorize_url(cfg)
+        print("1) Open this URL in a browser, sign in, and approve access:\n")
+        print(f"   {url}\n")
+        print(f"2) Your browser will try to load {cfg.frameio_redirect_uri}?code=...")
+        print("   (the page won't load -- that's fine; the code is in the address bar).")
+        print("3) Copy the FULL redirected URL and re-run:\n")
+        print("   cn-pipeline review auth --redirect-url '<paste the whole URL>'")
+        return
+    tok = frameio.exchange_code_for_tokens(cfg, args.redirect_url)
+    path = frameio.save_refresh_token_to_env(tok["refresh_token"])
+    print(f"Saved FRAMEIO_REFRESH_TOKEN to {path}.")
+    print("Frame.io V4 auth is ready -- access tokens now refresh automatically.")
+
+
 def cmd_review_submit(args):
-    """Upload the finished cndub to Frame.io for native-speaker review and
-    print the share link (paste into the Chinese DB's `Frame.io link` field)."""
+    """Upload a cndub cut to Frame.io for native-speaker review. The first cut is
+    shared on its own; each later --version is stacked as a NEW VERSION of the
+    previous cut and shared as one compare link, so a reviewer can flip v1<->v2
+    and check whether earlier comments are resolved. State lives in
+    scratch/frameio_review.json so v3+ append to the same stack + share."""
+    cfg = get_config()
     project_dir = paths.resolve_project_dir(args.project_id)
-    out = paths.deliverable_paths(project_dir)
+    out = paths.deliverable_paths(project_dir, args.version)
     if not out["cndub_mp4"].exists():
         sys.exit(f"{out['cndub_mp4'].name} not found -- render it before submitting for review")
-    result = frameio._api_upload_for_review(out["cndub_mp4"])
     scratch = _scratch(args.project_id)
-    (scratch / "review_link.txt").write_text(result.get("review_link", ""), encoding="utf-8")
-    print(json.dumps(result, indent=2))
+    rec_path = scratch / "frameio_review.json"
+    rec = (json.loads(rec_path.read_text(encoding="utf-8")) if rec_path.exists()
+           else {"versions": {}, "stack_id": None, "share_id": None, "review_link": None})
+    label = args.version or "v1"
+
+    account_id = frameio._account_id(cfg)
+    prior_assets = list(rec["versions"].values())
+    up = frameio.upload_file_for_review(out["cndub_mp4"])
+    new_asset = up["asset_id"]
+    rec["versions"][label] = new_asset
+
+    # Fold the new cut into a version stack with the previous cut(s).
+    if rec.get("stack_id"):
+        frameio.add_to_version_stack(cfg, account_id, new_asset, rec["stack_id"])  # v3+
+    elif prior_assets:
+        folder = frameio._project_root_folder(cfg, account_id)
+        rec["stack_id"] = frameio.create_version_stack(cfg, account_id, folder, prior_assets + [new_asset])
+        # first stack: retire the single-file share so the stack gets its own
+        if rec.get("share_id"):
+            frameio.delete_share(cfg, account_id, rec["share_id"])
+            rec["share_id"] = rec["review_link"] = None
+
+    # One review share, on the stack when there is one; reuse it across versions
+    # (a version stack's share auto-shows the newest version).
+    target = rec.get("stack_id") or new_asset
+    if not rec.get("share_id"):
+        sid, link = frameio._create_review_share(cfg, account_id, target, f"CN dub review — {args.project_id}")
+        rec["share_id"], rec["review_link"] = sid, link
+    rec_path.write_text(json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
+    link = rec.get("review_link") or up["view_url"]
+    (scratch / "review_link.txt").write_text(link, encoding="utf-8")
+
+    print(json.dumps({"version": label, "asset_id": new_asset,
+                      "stack_id": rec.get("stack_id"), "review_link": link}, indent=2))
+    print(f"\nReview link (paste into the Chinese DB's `Frame.io link` field, set Status: In review):\n  {link}")
 
 
 def cmd_review_fetch(args):
@@ -403,8 +504,14 @@ def cmd_review_fetch(args):
     project_dir = paths.resolve_project_dir(args.project_id)
     out = paths.deliverable_paths(project_dir)
     cues = frameio.parse_cndub_cues(out["bilingual_cndub_srt"])
+    # Live V4 comments carry a framestamp, not seconds -- probe the local cndub's
+    # fps to convert. (Frame.io's file object doesn't expose fps.) Offline exports
+    # ignore fps.
+    fps = None
+    if not args.comments_json and out["cndub_mp4"].exists():
+        fps = render.probe_fps(get_config().ffmpeg_path, out["cndub_mp4"])
     comments = frameio.fetch_comments(
-        args.asset_id, Path(args.comments_json) if args.comments_json else None
+        args.asset_id, Path(args.comments_json) if args.comments_json else None, fps=fps
     )
     report = frameio.build_review_report(comments, cues)
     (scratch / "review_report.json").write_text(
@@ -486,6 +593,9 @@ def main():
                            help="redo this stage even if its outputs are up to date "
                                 "(downstream stages then rerun automatically -- their "
                                 "inputs become newer than their outputs)")
+        sub_p.add_argument("--version", default="",
+                           help="revision suffix for deliverables (e.g. v2), so a review "
+                                "re-cut writes {id}_cndub_v2.mp4 without overwriting v1")
         sub_p.set_defaults(func=fn)
         return sub_p
 
@@ -527,11 +637,27 @@ def main():
     add(render_group, "verify", cmd_render_verify)
 
     review_group = sub.add_parser("review").add_subparsers(dest="cmd", required=True)
+    # `auth` is global setup (no project-id), so it's registered directly.
+    review_auth = review_group.add_parser("auth")
+    review_auth.add_argument("--redirect-url", dest="redirect_url", default=None)
+    review_auth.set_defaults(func=cmd_review_auth)
     add(review_group, "submit", cmd_review_submit)
     review_fetch = add(review_group, "fetch", cmd_review_fetch)
     review_fetch.add_argument("--asset-id", dest="asset_id", default=None)
     review_fetch.add_argument("--comments-json", dest="comments_json", default=None)
     add(review_group, "apply", cmd_review_apply)
+
+    publish_group = sub.add_parser("publish").add_subparsers(dest="cmd", required=True)
+    publish_auth = publish_group.add_parser("auth")
+    publish_auth.add_argument("--redirect-url", dest="redirect_url", default=None)
+    publish_auth.set_defaults(func=cmd_publish_auth)
+    publish_yt = add(publish_group, "youtube", cmd_publish_youtube)
+    publish_yt.add_argument("--title", default=None, help="video title (the Notion row's 中配 title)")
+    publish_yt.add_argument("--description-file", dest="description_file", default=None,
+                            help="path to a file holding the CN description")
+    publish_yt.add_argument("--tags", default=None, help="comma-separated CN tags")
+    publish_bili = publish_group.add_parser("bilibili")
+    publish_bili.set_defaults(func=cmd_publish_bilibili)
 
     args = p.parse_args()
     try:
