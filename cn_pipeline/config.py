@@ -68,24 +68,32 @@ class Config:
         # `review` stage needs them, and cn_pipeline.frameio raises a specific
         # message if a required one is missing when a review command runs.
         #
-        # Two auth modes, checked in this order by cn_pipeline.frameio:
-        #   1. OAuth Server-to-Server (preferred for automation): set
-        #      FRAMEIO_CLIENT_ID + FRAMEIO_CLIENT_SECRET in .env; the code mints
-        #      and refreshes short-lived access tokens from Adobe IMS itself.
-        #   2. Static access token: paste a V4 access token as FRAMEIO_TOKEN
+        # Auth modes, checked in this order by cn_pipeline.frameio._access_token:
+        #   1. User Authentication (OAuth Web App) refresh token: set
+        #      FRAMEIO_CLIENT_ID + FRAMEIO_CLIENT_SECRET + FRAMEIO_REFRESH_TOKEN.
+        #      Get the refresh token once via `cn-pipeline review auth` (browser
+        #      sign-in). The code then refreshes access tokens unattended.
+        #   2. OAuth Server-to-Server (client_credentials): FRAMEIO_CLIENT_ID +
+        #      FRAMEIO_CLIENT_SECRET only. Cleanest, but the S2S credential needs
+        #      an Adobe Admin Console license many orgs don't have.
+        #   3. Static access token: paste a V4 access token as FRAMEIO_TOKEN
         #      (simplest, but expires ~24h and must be re-pasted).
-        # Account/project ids are not secret, so they live in config.json.
+        # Account/project ids and the redirect URI are not secret -> config.json.
         self.frameio_token = os.environ.get("FRAMEIO_TOKEN", "")
         self.frameio_client_id = os.environ.get("FRAMEIO_CLIENT_ID", "")
         self.frameio_client_secret = os.environ.get("FRAMEIO_CLIENT_SECRET", "")
+        self.frameio_refresh_token = os.environ.get("FRAMEIO_REFRESH_TOKEN", "")
         self.frameio_account_id = raw.get("frameio_account_id", "")
         self.frameio_project_id = raw.get("frameio_project_id", "")
-        # IMS scopes for the S2S client_credentials grant. Overridable because
-        # the exact scope string is account/integration-specific; the default
-        # covers the roles-based authz Frame.io V4 uses.
+        # Must be HTTPS and match a redirect URI pattern registered on the Adobe
+        # Web App credential. The `review auth` flow only reads the code back
+        # from the browser's address bar, so nothing needs to actually serve it.
+        self.frameio_redirect_uri = raw.get("frameio_redirect_uri", "https://localhost/redirect/")
+        # IMS scopes. offline_access is REQUIRED to receive a refresh token in
+        # the User Authentication flow. Overridable per integration.
         self.frameio_ims_scope = raw.get(
             "frameio_ims_scope",
-            "openid, AdobeID, additional_info.roles, read_organizations",
+            "openid,AdobeID,email,profile,offline_access,additional_info.roles",
         )
 
         drive_root = raw.get("drive_root")

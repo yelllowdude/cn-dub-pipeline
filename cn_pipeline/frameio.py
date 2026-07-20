@@ -206,6 +206,7 @@ def apply_auto_fixes(report: dict, zh_lines: list[str]) -> tuple[list[str], list
 # pinned down. Everything downstream already works from an exported comments
 # JSON, so this adapter is the only part that needs a live token to verify.
 
+IMS_AUTHORIZE_URL = "https://ims-na1.adobelogin.com/ims/authorize/v2"
 IMS_TOKEN_URL = "https://ims-na1.adobelogin.com/ims/token/v3"
 
 _token_cache = {"value": None, "expires_at": 0.0}
@@ -231,49 +232,114 @@ def _unwrap(payload):
     return payload.get("data", payload) if isinstance(payload, dict) else payload
 
 
-def _mint_ims_token(cfg) -> str:
-    """OAuth Server-to-Server: exchange client credentials for a short-lived
-    access token, cached until ~60s before it expires."""
+def _ims_post(data: dict) -> dict:
+    """POST the IMS token endpoint and return the parsed token response."""
+    resp = requests.post(
+        IMS_TOKEN_URL, data=data,
+        headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=30,
+    )
+    if resp.status_code != 200:
+        raise ConfigError(f"Adobe IMS token request failed ({resp.status_code}): {resp.text[:300]}")
+    return resp.json()
+
+
+def _cached_token(mint) -> str:
+    """Return a cached access token, refreshing via `mint` ~60s before expiry."""
     now = time.time()
     if _token_cache["value"] and now < _token_cache["expires_at"]:
         return _token_cache["value"]
-    resp = requests.post(
-        IMS_TOKEN_URL,
-        data={
-            "grant_type": "client_credentials",
-            "client_id": cfg.frameio_client_id,
-            "client_secret": cfg.frameio_client_secret,
-            "scope": cfg.frameio_ims_scope,
-        },
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        timeout=30,
-    )
-    if resp.status_code != 200:
-        raise ConfigError(
-            f"Adobe IMS token request failed ({resp.status_code}): {resp.text[:300]}. "
-            "Check FRAMEIO_CLIENT_ID / FRAMEIO_CLIENT_SECRET and that your Adobe "
-            "Developer Console project has the Frame.io API added with an OAuth "
-            "Server-to-Server credential (requires an Adobe Admin Console account)."
-        )
-    tok = resp.json()
+    tok = mint()
     _token_cache["value"] = tok["access_token"]
     _token_cache["expires_at"] = now + int(tok.get("expires_in", 3600)) - 60
     return _token_cache["value"]
 
 
 def _access_token(cfg) -> str:
-    """Prefer S2S client credentials (auto-refresh); else a static pasted
-    token; else a specific, actionable error."""
-    if cfg.frameio_client_id and cfg.frameio_client_secret:
-        return _mint_ims_token(cfg)
+    """Resolve a usable V4 access token from whatever auth is configured:
+    User-Auth refresh token > S2S client credentials > static pasted token."""
+    cid, secret = cfg.frameio_client_id, cfg.frameio_client_secret
+    if cid and secret and cfg.frameio_refresh_token:
+        return _cached_token(lambda: _ims_post({
+            "grant_type": "refresh_token", "client_id": cid, "client_secret": secret,
+            "refresh_token": cfg.frameio_refresh_token, "scope": cfg.frameio_ims_scope,
+        }))
+    if cid and secret:
+        return _cached_token(lambda: _ims_post({
+            "grant_type": "client_credentials", "client_id": cid, "client_secret": secret,
+            "scope": cfg.frameio_ims_scope,
+        }))
     if cfg.frameio_token:
         return cfg.frameio_token
     raise ConfigError(
-        "No Frame.io V4 credentials. Set FRAMEIO_CLIENT_ID + FRAMEIO_CLIENT_SECRET "
-        "in .env (OAuth Server-to-Server, recommended), or paste a V4 access token "
-        "as FRAMEIO_TOKEN. Until then, `review fetch --comments-json <exported.json>` "
-        "runs the resolve/classify/apply logic offline."
+        "No Frame.io V4 credentials. Run `cn-pipeline review auth` to sign in and store a "
+        "refresh token (needs FRAMEIO_CLIENT_ID/SECRET from an Adobe Web App credential); or "
+        "set FRAMEIO_CLIENT_ID/SECRET alone for Server-to-Server; or paste a V4 access token "
+        "as FRAMEIO_TOKEN. Until then, `review fetch --comments-json <exported.json>` runs offline."
     )
+
+
+# --- one-time User-Authentication (OAuth) helper -----------------------------
+
+def build_authorize_url(cfg) -> str:
+    """The IMS sign-in URL for the User-Auth flow. offline_access must be in the
+    scope (config) so the exchanged token carries a refresh token."""
+    from urllib.parse import urlencode
+    if not (cfg.frameio_client_id and cfg.frameio_client_secret):
+        raise ConfigError(
+            "Set FRAMEIO_CLIENT_ID and FRAMEIO_CLIENT_SECRET (from an Adobe Developer "
+            "Console 'User Authentication' Web App credential) before `review auth`."
+        )
+    q = urlencode({
+        "client_id": cfg.frameio_client_id,
+        "redirect_uri": cfg.frameio_redirect_uri,
+        "scope": cfg.frameio_ims_scope,
+        "response_type": "code",
+    })
+    return f"{IMS_AUTHORIZE_URL}?{q}"
+
+
+def _code_from_redirect(redirect_or_code: str) -> str:
+    """Accept either the full redirected URL (…/redirect/?code=XYZ) or a bare code."""
+    from urllib.parse import urlparse, parse_qs
+    s = redirect_or_code.strip().strip("'\"")
+    if "code=" not in s:
+        return s  # assume a bare code was pasted
+    codes = parse_qs(urlparse(s).query).get("code")
+    if not codes:
+        raise ConfigError("no `code=` parameter found in the pasted redirect URL")
+    return codes[0]
+
+
+def exchange_code_for_tokens(cfg, redirect_or_code: str) -> dict:
+    """Exchange the one-time auth code for {access_token, refresh_token, ...}."""
+    tok = _ims_post({
+        "grant_type": "authorization_code",
+        "client_id": cfg.frameio_client_id,
+        "client_secret": cfg.frameio_client_secret,
+        "code": _code_from_redirect(redirect_or_code),
+    })
+    if not tok.get("refresh_token"):
+        raise ConfigError(
+            "IMS returned no refresh_token. Ensure `offline_access` is in frameio_ims_scope "
+            "and the Web App credential is allowed to request it."
+        )
+    return tok
+
+
+def save_refresh_token_to_env(refresh_token: str) -> Path:
+    """Persist FRAMEIO_REFRESH_TOKEN into the data-dir .env, replacing any prior line."""
+    from cn_pipeline.config import ENV_PATH
+    lines = ENV_PATH.read_text(encoding="utf-8").splitlines() if ENV_PATH.exists() else []
+    out, found = [], False
+    for ln in lines:
+        if ln.startswith("FRAMEIO_REFRESH_TOKEN="):
+            out.append(f"FRAMEIO_REFRESH_TOKEN={refresh_token}"); found = True
+        else:
+            out.append(ln)
+    if not found:
+        out.append(f"FRAMEIO_REFRESH_TOKEN={refresh_token}")
+    ENV_PATH.write_text("\n".join(out) + "\n", encoding="utf-8")
+    return ENV_PATH
 
 
 def _headers(cfg, json_body: bool = True) -> dict:

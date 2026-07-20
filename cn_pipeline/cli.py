@@ -382,6 +382,26 @@ def cmd_screentext_localize(args):
         print("\nNo localized master written -- renders will use the raw master unchanged.")
 
 
+def cmd_review_auth(args):
+    """One-time Frame.io V4 sign-in (User Authentication). Without --redirect-url,
+    prints the IMS authorize URL to open; with it, exchanges the returned code for
+    a refresh token and saves it to .env so future runs authenticate unattended."""
+    cfg = get_config()
+    if not args.redirect_url:
+        url = frameio.build_authorize_url(cfg)
+        print("1) Open this URL in a browser, sign in, and approve access:\n")
+        print(f"   {url}\n")
+        print(f"2) Your browser will try to load {cfg.frameio_redirect_uri}?code=...")
+        print("   (the page won't load -- that's fine; the code is in the address bar).")
+        print("3) Copy the FULL redirected URL and re-run:\n")
+        print("   cn-pipeline review auth --redirect-url '<paste the whole URL>'")
+        return
+    tok = frameio.exchange_code_for_tokens(cfg, args.redirect_url)
+    path = frameio.save_refresh_token_to_env(tok["refresh_token"])
+    print(f"Saved FRAMEIO_REFRESH_TOKEN to {path}.")
+    print("Frame.io V4 auth is ready -- access tokens now refresh automatically.")
+
+
 def cmd_review_submit(args):
     """Upload the finished cndub to Frame.io for native-speaker review and
     print the share link (paste into the Chinese DB's `Frame.io link` field)."""
@@ -393,6 +413,8 @@ def cmd_review_submit(args):
     scratch = _scratch(args.project_id)
     (scratch / "review_link.txt").write_text(result.get("review_link", ""), encoding="utf-8")
     print(json.dumps(result, indent=2))
+    if result.get("review_link"):
+        print(f"\nReview link (paste into the Chinese DB's `Frame.io link` field, set Status: In review):\n  {result['review_link']}")
 
 
 def cmd_review_fetch(args):
@@ -527,6 +549,10 @@ def main():
     add(render_group, "verify", cmd_render_verify)
 
     review_group = sub.add_parser("review").add_subparsers(dest="cmd", required=True)
+    # `auth` is global setup (no project-id), so it's registered directly.
+    review_auth = review_group.add_parser("auth")
+    review_auth.add_argument("--redirect-url", dest="redirect_url", default=None)
+    review_auth.set_defaults(func=cmd_review_auth)
     add(review_group, "submit", cmd_review_submit)
     review_fetch = add(review_group, "fetch", cmd_review_fetch)
     review_fetch.add_argument("--asset-id", dest="asset_id", default=None)

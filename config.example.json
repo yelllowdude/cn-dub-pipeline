@@ -7,5 +7,6 @@
   "max_screentext_clean_calls_per_run": 40,
   "screentext_enabled": false,
   "frameio_account_id": "",
-  "frameio_project_id": ""
+  "frameio_project_id": "",
+  "frameio_redirect_uri": "https://localhost/redirect/"
 }

@@ -107,5 +107,26 @@ def test_normalize_v4_framestamp_vs_offline_seconds():
     assert exp["timestamp_ms"] == 1234 and exp["text"] == "b"
 
 
+class _AuthCfg:
+    frameio_client_id = "cid123"
+    frameio_client_secret = "sec"
+    frameio_refresh_token = ""
+    frameio_redirect_uri = "https://localhost/redirect/"
+    frameio_ims_scope = "openid,AdobeID,email,profile,offline_access,additional_info.roles"
+    frameio_token = ""
+
+
+def test_build_authorize_url_and_code_parse():
+    url = fio.build_authorize_url(_AuthCfg())
+    assert url.startswith("https://ims-na1.adobelogin.com/ims/authorize/v2?")
+    assert "client_id=cid123" in url and "response_type=code" in url
+    assert "offline_access" in url  # required for a refresh token
+    assert "redirect_uri=https%3A%2F%2Flocalhost%2Fredirect%2F" in url
+    # code can be pulled from a full redirect URL, a quoted one, or pasted bare
+    assert fio._code_from_redirect("https://localhost/redirect/?code=ABC&state=x") == "ABC"
+    assert fio._code_from_redirect("'https://localhost/redirect/?code=XYZ'") == "XYZ"
+    assert fio._code_from_redirect("  BARE  ") == "BARE"
+
+
 if __name__ == "__main__":
     run_module(dict(globals()))
