@@ -201,6 +201,27 @@ chunks whose lines actually changed — never trust or hand-edit the files in
    tags, ad-disclosure section if `Contains ads?`) per `cn_workflow.html`'s
    Data Model section, set `Status: Review draft`, and stop.
 
+   **Product names stay in English everywhere** (titles, descriptions, subs,
+   dub): "Pistol Squat Cheat Sheet", "Playbook", etc. — see the glossary's
+   locked-terms table. Translate around the name, never the name.
+
+   **Publish-status reminder block — add at the TOP of the row's page content
+   on every new project (temporary convention while Bilibili API access is
+   pending; the whole block gets deleted once it's live):**
+
+   > 💡 callout, with this inside:
+   > Delete this reminder once Bilibili API access is live.
+   > Link in a publish property = published.
+   > Publish statuses:
+   > - [ ] ENsub Bilibili
+   > - [ ] CNdub Bilibili
+   > - [ ] CNdub YouTube
+
+   The three to-dos mirror the three URL properties (`ENsub Bilibili`,
+   `CNdub Bilibili`, `CNdub YouTube`). Whoever fills a link property checks
+   (and strikes through) the matching to-do — the publish skill does this for
+   its own uploads.
+
 ## If something fails partway
 
 Check `runs/{id}/*.log` and `runs/{id}/*_log.json` for the stage that failed.

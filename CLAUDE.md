@@ -28,7 +28,9 @@ and then drives the CLI.
   only in filenames and the Frame.io version stack.
 - **Glossary is law** (`glossary/cn_glossary.md`): "Go Bananas" stays English,
   "Yellow Dude" → 光头黄, hamstrings → 大腿后侧 (never 腘绳肌 — the TTS voice
-  mispronounces 腘; this exact regression came back from a native reviewer).
+  mispronounces 腘; this exact regression came back from a native reviewer),
+  and **product names stay in English** ("Pistol Squat Cheat Sheet", never
+  手枪式深蹲小抄 — buyers must be able to find the SKU by name).
 - **CN dub subtitles burn from a generated .ass, not SRT** (`build_cndub_ass`):
   ffmpeg's SRT reader strips inline `{\fs}` overrides, so SRT+force_style
   cannot size the Chinese and English lines differently. The .ass gives one
@@ -53,7 +55,7 @@ and then drives the CLI.
 previous cut, and shares the STACK: the reviewer gets Frame.io's version
 dropdown + Compare and checks old comments against the new cut. The share
 short-url (f.io/…) is **stable across versions** — it's written once into the
-Chinese DB's `Frame.io link` and doesn't need updating per re-cut. Passphrase
+Chinese DB's `Review link` property and doesn't need updating per re-cut. Passphrase
 comes from `FRAMEIO_SHARE_PASSPHRASE`. State lives in
 `runs/{id}/frameio_review.json` (versions, stack_id, share_id).
 
@@ -75,7 +77,7 @@ upstream and were probed against the live account.
 - Google OAuth app must be **published to production** in the console;
   test-mode refresh tokens die every 7 days.
 - Bilibili: stubbed, waiting on official API access. Both variants will go
-  there (ENsub link / CNdub link in the Chinese DB).
+  there (`ENsub Bilibili` / `CNdub Bilibili` in the Chinese DB).
 - Queue: the Chinese DB's `Publish requested` checkbox is intent only; nothing
   polls it. Publishing happens when a human runs the `publish-chinese` skill.
 

@@ -36,6 +36,7 @@ GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 # upload-only scope: least privilege that still returns the video id/link
 YOUTUBE_SCOPE = "https://www.googleapis.com/auth/youtube.upload"
 YOUTUBE_UPLOAD_URL = "https://www.googleapis.com/upload/youtube/v3/videos"
+YOUTUBE_THUMBNAIL_URL = "https://www.googleapis.com/upload/youtube/v3/thumbnails/set"
 # Desktop OAuth clients accept a bare loopback redirect; the sign-in ends on a
 # localhost URL that won't load -- the code is copied from the address bar,
 # exactly like the Frame.io `review auth` flow.
@@ -192,3 +193,24 @@ def upload_youtube_draft(video_path: Path, title: str, description: str = "",
                     f"chunk PUT failed at byte {sent} ({put.status_code}): {put.text[:300]}")
             sent = end + 1
     raise RuntimeError("upload loop ended without a completed response")
+
+
+def set_thumbnail(video_id: str, image_path: Path) -> dict:
+    """Set the video's custom thumbnail (thumbnails.set accepts the upload-only
+    scope). Requires the channel to have custom thumbnails enabled (phone
+    verification) -- a 403 here means verify the channel, not a code bug.
+    Returns {ok, detail}."""
+    cfg = get_config()
+    suffix = image_path.suffix.lower()
+    content_type = "image/png" if suffix == ".png" else "image/jpeg"
+    resp = requests.post(
+        f"{YOUTUBE_THUMBNAIL_URL}?videoId={video_id}",
+        headers={
+            "Authorization": f"Bearer {_access_token(cfg)}",
+            "Content-Type": content_type,
+        },
+        data=image_path.read_bytes(), timeout=120,
+    )
+    if resp.status_code != 200:
+        return {"ok": False, "detail": f"thumbnails.set {resp.status_code}: {resp.text[:300]}"}
+    return {"ok": True, "detail": f"thumbnail set from {image_path.name}"}
