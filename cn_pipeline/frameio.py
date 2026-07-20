@@ -17,12 +17,12 @@ The flow, and where the value is:
 
 Design honesty: the comment RESOLUTION and CLASSIFICATION logic below is pure
 and unit-tested -- it's the part that was validated against real reviewer data.
-The live Frame.io HTTP calls (_api_*) are isolated in one place and marked
-UNVERIFIED: exact v4 endpoints/paths still need confirming against a real
-token. Everything downstream works today from an exported comments JSON
-(`fetch --comments-json ...`), so the pipeline is usable and testable before
-the raw API is nailed down -- the API is a thin, swappable adapter, not the
-substance.
+The live Frame.io V4 HTTP calls (_api_*) are isolated in one place. Endpoint
+PATHS are confirmed against the V4 migration guide; a few response FIELD names
+are read defensively (_first) and get pinned on the first live call. Everything
+downstream also works from an exported comments JSON (`fetch --comments-json
+...`), so the pipeline stays usable and testable independent of the raw API --
+the API is a thin, swappable adapter, not the substance.
 
 A cue's index maps 1:1 to the translation: cue N in {id}_bilingual_cndub.srt
 is zh.json[N-1] (align-dub emits one cue per translated line, in order). That
@@ -32,6 +32,7 @@ annotate the srt.
 
 import json
 import re
+import time
 from pathlib import Path
 
 import requests
@@ -39,7 +40,7 @@ import requests
 from cn_pipeline.config import ConfigError, get_config
 from cn_pipeline.subtitles import parse_srt_time
 
-FRAMEIO_API_BASE = "https://api.frame.io/v4"  # UNVERIFIED: confirm against a real token
+FRAMEIO_API_BASE = "https://api.frame.io/v4"
 
 
 # --- srt cue parsing (pure) --------------------------------------------------
@@ -189,65 +190,244 @@ def apply_auto_fixes(report: dict, zh_lines: list[str]) -> tuple[list[str], list
     return new, changelog
 
 
-# --- Frame.io HTTP adapter (ISOLATED, UNVERIFIED endpoints) ------------------
+# --- Frame.io V4 HTTP adapter (isolated) -------------------------------------
+#
+# Auth uses Adobe IMS. Preferred: OAuth Server-to-Server (client_credentials),
+# so the pipeline mints/refreshes its own access tokens unattended. Fallback:
+# a static V4 access token pasted as FRAMEIO_TOKEN (expires ~24h).
+#
+# Endpoint PATHS are from the V4 migration guide (confirmed):
+#   local upload : POST /accounts/{acct}/folders/{folder}/files/local_upload
+#   list comments: GET  /accounts/{acct}/files/{file}/comments   (timestamp = framestamp, 1-based)
+#   create share : POST /accounts/{acct}/projects/{proj}/shares  {"data":{"name","type":"review"}}
+#   add to share : POST /accounts/{acct}/shares/{share}/assets
+# Response FIELD names are read defensively via _first() because they vary
+# slightly per resource; the first live call is where any remaining name is
+# pinned down. Everything downstream already works from an exported comments
+# JSON, so this adapter is the only part that needs a live token to verify.
 
-def _token() -> str:
-    tok = get_config().frameio_token
-    if not tok:
+IMS_TOKEN_URL = "https://ims-na1.adobelogin.com/ims/token/v3"
+
+_token_cache = {"value": None, "expires_at": 0.0}
+
+
+def _first(d: dict, *keys, default=None):
+    """First present, non-None value among keys, looking at the object and one
+    level into a 'data' envelope. Absorbs minor V4 response-shape variance
+    without scattering .get() chains through the call sites."""
+    sources = [d]
+    if isinstance(d, dict) and isinstance(d.get("data"), dict):
+        sources.append(d["data"])
+    for src in sources:
+        if isinstance(src, dict):
+            for k in keys:
+                if src.get(k) is not None:
+                    return src[k]
+    return default
+
+
+def _unwrap(payload):
+    """V4 wraps single resources and lists under 'data'."""
+    return payload.get("data", payload) if isinstance(payload, dict) else payload
+
+
+def _mint_ims_token(cfg) -> str:
+    """OAuth Server-to-Server: exchange client credentials for a short-lived
+    access token, cached until ~60s before it expires."""
+    now = time.time()
+    if _token_cache["value"] and now < _token_cache["expires_at"]:
+        return _token_cache["value"]
+    resp = requests.post(
+        IMS_TOKEN_URL,
+        data={
+            "grant_type": "client_credentials",
+            "client_id": cfg.frameio_client_id,
+            "client_secret": cfg.frameio_client_secret,
+            "scope": cfg.frameio_ims_scope,
+        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=30,
+    )
+    if resp.status_code != 200:
         raise ConfigError(
-            "FRAMEIO_TOKEN is empty in .env. Register a Frame.io / Adobe "
-            "Developer Console app (assets-read + comments-read + upload scope) "
-            "and add FRAMEIO_TOKEN=... to .env. Until then, use "
-            "`review fetch --comments-json <exported.json>` to run the "
-            "resolve/classify/apply logic offline."
+            f"Adobe IMS token request failed ({resp.status_code}): {resp.text[:300]}. "
+            "Check FRAMEIO_CLIENT_ID / FRAMEIO_CLIENT_SECRET and that your Adobe "
+            "Developer Console project has the Frame.io API added with an OAuth "
+            "Server-to-Server credential (requires an Adobe Admin Console account)."
         )
-    return tok
+    tok = resp.json()
+    _token_cache["value"] = tok["access_token"]
+    _token_cache["expires_at"] = now + int(tok.get("expires_in", 3600)) - 60
+    return _token_cache["value"]
 
 
-def _headers() -> dict:
-    return {"Authorization": f"Bearer {_token()}", "Content-Type": "application/json"}
-
-
-def _api_upload_for_review(video_path: Path) -> dict:
-    """UNVERIFIED. Upload the video as a review asset; return
-    {asset_id, review_link}. Frame.io's upload is a create-then-PUT-to-signed-URL
-    dance; the exact v4 shape needs confirming against a live token. Kept in one
-    function so swapping in the verified calls touches nothing else."""
-    raise NotImplementedError(
-        "Frame.io upload endpoint not yet verified. For now, upload the cndub "
-        "to Frame.io by hand, share it with the reviewer, and use "
-        "`review fetch --comments-json <exported comments>` once they've "
-        "commented. See module docstring."
+def _access_token(cfg) -> str:
+    """Prefer S2S client credentials (auto-refresh); else a static pasted
+    token; else a specific, actionable error."""
+    if cfg.frameio_client_id and cfg.frameio_client_secret:
+        return _mint_ims_token(cfg)
+    if cfg.frameio_token:
+        return cfg.frameio_token
+    raise ConfigError(
+        "No Frame.io V4 credentials. Set FRAMEIO_CLIENT_ID + FRAMEIO_CLIENT_SECRET "
+        "in .env (OAuth Server-to-Server, recommended), or paste a V4 access token "
+        "as FRAMEIO_TOKEN. Until then, `review fetch --comments-json <exported.json>` "
+        "runs the resolve/classify/apply logic offline."
     )
 
 
+def _headers(cfg, json_body: bool = True) -> dict:
+    h = {"Authorization": f"Bearer {_access_token(cfg)}", "Accept": "application/json"}
+    if json_body:
+        h["Content-Type"] = "application/json"
+    return h
+
+
+def _api(method: str, path: str, cfg, **kw) -> dict:
+    """One V4 request against the account-prefixed base, with a readable error."""
+    url = path if path.startswith("http") else f"{FRAMEIO_API_BASE}{path}"
+    resp = requests.request(method, url, headers=_headers(cfg), timeout=120, **kw)
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Frame.io {method} {path} -> {resp.status_code}: {resp.text[:400]}")
+    return resp.json() if resp.content else {}
+
+
+def _account_id(cfg) -> str:
+    """The configured account, or the first the token can see."""
+    if cfg.frameio_account_id:
+        return cfg.frameio_account_id
+    accounts = _unwrap(_api("GET", "/accounts", cfg))
+    if isinstance(accounts, list) and accounts:
+        return _first(accounts[0], "id")
+    if isinstance(accounts, dict):
+        return _first(accounts, "id")
+    raise RuntimeError("no Frame.io accounts visible to this token; set frameio_account_id")
+
+
+def _project_root_folder(cfg, account_id: str) -> str:
+    if not cfg.frameio_project_id:
+        raise ConfigError("config.json is missing 'frameio_project_id' (where to upload the review copy)")
+    proj = _api("GET", f"/accounts/{account_id}/projects/{cfg.frameio_project_id}", cfg)
+    root = _first(proj, "root_folder_id", "root_asset_id", "folder_id")
+    if not root:
+        raise RuntimeError(f"no root folder id in project response: {json.dumps(proj)[:300]}")
+    return root
+
+
+def _api_upload_for_review(video_path: Path) -> dict:
+    """Upload the cndub to Frame.io V4 and open a review share.
+    Returns {asset_id, review_link, share_id}. Flow:
+      1) create file (local_upload) -> presigned S3 part URLs
+      2) PUT each part
+      3) create a review share on the project and attach the file
+    """
+    cfg = get_config()
+    account_id = _account_id(cfg)
+    folder_id = _project_root_folder(cfg, account_id)
+    size = video_path.stat().st_size
+    media_type = "video/mp4"
+
+    created = _api(
+        "POST", f"/accounts/{account_id}/folders/{folder_id}/files/local_upload", cfg,
+        json={"data": {"name": video_path.name, "file_size": size, "media_type": media_type}},
+    )
+    file_id = _first(created, "id")
+    parts = _first(created, "upload_urls", "uploads", default=[])
+    if not file_id or not parts:
+        raise RuntimeError(f"unexpected local_upload response: {json.dumps(created)[:400]}")
+
+    # PUT each presigned part. Use the per-part size the API returns when
+    # present; otherwise split the file evenly across the returned URLs.
+    with open(video_path, "rb") as fh:
+        n = len(parts)
+        even = -(-size // n)  # ceil division
+        for i, part in enumerate(parts):
+            url = part["url"] if isinstance(part, dict) else part
+            psize = part.get("size") if isinstance(part, dict) else None
+            chunk = fh.read(psize) if psize else fh.read(even)
+            put = requests.put(url, data=chunk, headers={"Content-Type": media_type}, timeout=600)
+            if put.status_code not in (200, 201, 204):
+                raise RuntimeError(f"chunk {i + 1}/{n} PUT failed: {put.status_code} {put.text[:200]}")
+
+    share = _api(
+        "POST", f"/accounts/{account_id}/projects/{cfg.frameio_project_id}/shares", cfg,
+        json={"data": {"name": f"CN dub review — {video_path.stem}", "type": "review"}},
+    )
+    share_id = _first(share, "id")
+    review_link = _first(share, "short_url", "url", "review_link", "link")
+    if share_id:
+        _api("POST", f"/accounts/{account_id}/shares/{share_id}/assets", cfg,
+             json={"data": {"asset_id": file_id}})
+    return {"asset_id": file_id, "share_id": share_id, "review_link": review_link or ""}
+
+
+def _api_file_fps(cfg, account_id: str, file_id: str):
+    """A V4 comment's timestamp is a framestamp; converting to ms needs the
+    file's fps. Best-effort -- returns None if the field isn't present."""
+    try:
+        f = _api("GET", f"/accounts/{account_id}/files/{file_id}", cfg)
+    except Exception:
+        return None
+    fps = _first(f, "fps", "frame_rate")
+    if fps is None:
+        media = _first(f, "media_info", "metadata")
+        if isinstance(media, dict):
+            fps = media.get("fps") or media.get("frame_rate")
+    try:
+        return float(fps) if fps else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _api_fetch_comments(asset_id: str) -> list[dict]:
-    """UNVERIFIED endpoint path; normalization is the stable part. Returns
-    normalized [{id, text, timestamp_ms, author}]. Frame.io gives a comment a
-    frame-based `timestamp`; convert with the asset fps when wiring this live."""
-    resp = requests.get(f"{FRAMEIO_API_BASE}/assets/{asset_id}/comments",
-                        headers=_headers(), timeout=60)
-    resp.raise_for_status()
-    return [_normalize_comment(c) for c in resp.json().get("data", resp.json())]
+    """Pull comments for a file and normalize them. In V4 a comment's
+    `timestamp` is a framestamp (1-based), so we fetch the file's fps to convert
+    to ms. Follows `next` pagination if present."""
+    cfg = get_config()
+    account_id = _account_id(cfg)
+    fps = _api_file_fps(cfg, account_id, asset_id)
+    out, path = [], f"/accounts/{account_id}/files/{asset_id}/comments"
+    while path:
+        payload = _api("GET", path, cfg)
+        for c in _unwrap(payload) or []:
+            out.append(_normalize_comment(c, fps=fps))
+        nxt = None
+        if isinstance(payload, dict):
+            links = payload.get("links") or {}
+            nxt = links.get("next") or payload.get("next") or payload.get("next_cursor")
+        path = nxt if isinstance(nxt, str) else None
+    return out
 
 
-def _normalize_comment(raw: dict) -> dict:
-    """Map a raw Frame.io comment to our schema. Accepts either a seconds
-    `timestamp` or a `frame`+`fps`; offline exports should just provide
-    timestamp_ms directly."""
-    if "timestamp_ms" in raw:
+def _normalize_comment(raw: dict, fps: float | None = None) -> dict:
+    """Map a raw Frame.io comment to our schema {id, text, timestamp_ms, author}.
+    Timestamp resolution, in priority order:
+      1. explicit `timestamp_ms`         -- offline exports should provide this
+      2. V4 framestamp (`framestamp`, or `timestamp` when fps is known), 1-based
+      3. seconds `timestamp`             -- legacy / seconds-based exports
+      4. `frame` + `fps` pair
+    fps is passed by the live V4 fetch (from the file) and left None offline, so
+    an export's seconds `timestamp` is never misread as a framestamp."""
+    if raw.get("timestamp_ms") is not None:
         ts_ms = int(raw["timestamp_ms"])
-    elif "timestamp" in raw:
+    elif fps and (raw.get("framestamp") is not None or raw.get("timestamp") is not None):
+        frame = raw.get("framestamp", raw.get("timestamp"))
+        ts_ms = int(max(0.0, float(frame) - 1) / fps * 1000)
+    elif raw.get("timestamp") is not None:
         ts_ms = int(float(raw["timestamp"]) * 1000)
-    elif "frame" in raw and raw.get("fps"):
+    elif raw.get("frame") is not None and raw.get("fps"):
         ts_ms = int(raw["frame"] / float(raw["fps"]) * 1000)
     else:
         ts_ms = 0
+    author = raw.get("author")
+    if author is None:
+        owner = raw.get("owner")
+        author = owner.get("name") if isinstance(owner, dict) else raw.get("author_name")
     return {
         "id": raw.get("id"),
         "text": raw.get("text", raw.get("body", "")),
         "timestamp_ms": ts_ms,
-        "author": raw.get("author", raw.get("owner", {}).get("name") if isinstance(raw.get("owner"), dict) else None),
+        "author": author,
     }
 
 

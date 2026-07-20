@@ -5,5 +5,7 @@
   "max_tts_calls_per_run": 60,
   "max_kie_calls_per_run": 5,
   "max_screentext_clean_calls_per_run": 40,
-  "screentext_enabled": false
+  "screentext_enabled": false,
+  "frameio_account_id": "",
+  "frameio_project_id": ""
 }

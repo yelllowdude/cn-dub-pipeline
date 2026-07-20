@@ -64,10 +64,29 @@ class Config:
         if not self.kie_api_key:
             raise ConfigError("KIE_API_KEY is empty in .env")
 
-        # Optional -- only the review stage needs it, so it's not a hard error
-        # at startup. cn_pipeline.frameio raises a clear message if it's missing
-        # when a review command actually runs.
+        # Frame.io V4 review integration. All optional at startup -- only the
+        # `review` stage needs them, and cn_pipeline.frameio raises a specific
+        # message if a required one is missing when a review command runs.
+        #
+        # Two auth modes, checked in this order by cn_pipeline.frameio:
+        #   1. OAuth Server-to-Server (preferred for automation): set
+        #      FRAMEIO_CLIENT_ID + FRAMEIO_CLIENT_SECRET in .env; the code mints
+        #      and refreshes short-lived access tokens from Adobe IMS itself.
+        #   2. Static access token: paste a V4 access token as FRAMEIO_TOKEN
+        #      (simplest, but expires ~24h and must be re-pasted).
+        # Account/project ids are not secret, so they live in config.json.
         self.frameio_token = os.environ.get("FRAMEIO_TOKEN", "")
+        self.frameio_client_id = os.environ.get("FRAMEIO_CLIENT_ID", "")
+        self.frameio_client_secret = os.environ.get("FRAMEIO_CLIENT_SECRET", "")
+        self.frameio_account_id = raw.get("frameio_account_id", "")
+        self.frameio_project_id = raw.get("frameio_project_id", "")
+        # IMS scopes for the S2S client_credentials grant. Overridable because
+        # the exact scope string is account/integration-specific; the default
+        # covers the roles-based authz Frame.io V4 uses.
+        self.frameio_ims_scope = raw.get(
+            "frameio_ims_scope",
+            "openid, AdobeID, additional_info.roles, read_organizations",
+        )
 
         drive_root = raw.get("drive_root")
         if not drive_root:
