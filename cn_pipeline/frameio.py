@@ -422,20 +422,14 @@ def _create_review_share(cfg, account_id: str, file_id: str, name: str):
         return None, None
 
 
-def _api_upload_for_review(video_path: Path) -> dict:
-    """Upload the cndub to Frame.io V4 for native-speaker review.
-    Returns {asset_id, review_link, view_url, share_id}. Flow:
-      1) create file (local_upload) -> presigned S3 part URLs (+ the file view_url)
-      2) PUT each part to S3
-      3) try to open a public review share; fall back to the file's view_url
-    review_link is what to paste into Notion: the public share URL when the API
-    allows it, otherwise the view_url (opens the file for anyone with workspace
-    access -- fine for internal reviewers)."""
+def upload_file_for_review(video_path: Path) -> dict:
+    """Upload one cndub cut to Frame.io V4 (create file -> PUT presigned parts).
+    Returns {asset_id, view_url}. Sharing and version-stacking are the caller's
+    job so a re-cut can be stacked onto the previous version, not just re-shared."""
     cfg = get_config()
     account_id = _account_id(cfg)
     folder_id = _project_root_folder(cfg, account_id)
     size = video_path.stat().st_size
-
     created = _api(
         "POST", f"/accounts/{account_id}/folders/{folder_id}/files/local_upload", cfg,
         json={"data": {"name": video_path.name, "file_size": size}},
@@ -446,22 +440,39 @@ def _api_upload_for_review(video_path: Path) -> dict:
     parts = _first(created, "upload_urls", "uploads", default=[])
     if not file_id or not parts:
         raise RuntimeError(f"unexpected local_upload response: {json.dumps(created)[:400]}")
-
-    # PUT each presigned part; use the per-part size the API returns.
     with open(video_path, "rb") as fh:
         for part in parts:
             psize = part.get("size") if isinstance(part, dict) else None
             url = part["url"] if isinstance(part, dict) else part
             _put_upload_part(url, fh.read(psize) if psize else fh.read(), media_type)
+    return {"asset_id": file_id, "view_url": view_url}
 
-    share_id, share_url = _create_review_share(
-        cfg, account_id, file_id, f"CN dub review — {video_path.stem}")
-    return {
-        "asset_id": file_id,
-        "share_id": share_id,
-        "review_link": share_url or view_url,
-        "view_url": view_url,
-    }
+
+def create_version_stack(cfg, account_id: str, folder_id: str, file_ids: list[str]) -> str:
+    """Merge 2-10 uploaded files into a version stack (verified live):
+      POST /accounts/{acct}/folders/{folder}/version_stacks {"data":{"file_ids":[...]}}
+    Order is oldest->newest; the last id becomes the current version. So reviewers
+    get Frame.io's version dropdown + Compare, and prior-version comments carry
+    over for check-off. Returns the version_stack id."""
+    res = _api("POST", f"/accounts/{account_id}/folders/{folder_id}/version_stacks", cfg,
+               json={"data": {"file_ids": file_ids}})
+    return _first(res, "id")
+
+
+def add_to_version_stack(cfg, account_id: str, file_id: str, stack_id: str) -> None:
+    """Move an already-uploaded file into an existing version stack (for v3+):
+      PATCH /accounts/{acct}/files/{file}/move  with the stack as the new parent."""
+    _api("PATCH", f"/accounts/{account_id}/files/{file_id}/move", cfg,
+         json={"data": {"parent_id": stack_id}})
+
+
+def delete_share(cfg, account_id: str, share_id: str) -> None:
+    """Best-effort delete of a share (used to retire a single-file share once its
+    file is folded into a version stack that gets its own share)."""
+    try:
+        _api("DELETE", f"/accounts/{account_id}/shares/{share_id}", cfg)
+    except Exception:
+        pass
 
 
 def _api_file_fps(cfg, account_id: str, file_id: str):

@@ -403,18 +403,52 @@ def cmd_review_auth(args):
 
 
 def cmd_review_submit(args):
-    """Upload the finished cndub to Frame.io for native-speaker review and
-    print the share link (paste into the Chinese DB's `Frame.io link` field)."""
+    """Upload a cndub cut to Frame.io for native-speaker review. The first cut is
+    shared on its own; each later --version is stacked as a NEW VERSION of the
+    previous cut and shared as one compare link, so a reviewer can flip v1<->v2
+    and check whether earlier comments are resolved. State lives in
+    scratch/frameio_review.json so v3+ append to the same stack + share."""
+    cfg = get_config()
     project_dir = paths.resolve_project_dir(args.project_id)
     out = paths.deliverable_paths(project_dir, args.version)
     if not out["cndub_mp4"].exists():
         sys.exit(f"{out['cndub_mp4'].name} not found -- render it before submitting for review")
-    result = frameio._api_upload_for_review(out["cndub_mp4"])
     scratch = _scratch(args.project_id)
-    (scratch / "review_link.txt").write_text(result.get("review_link", ""), encoding="utf-8")
-    print(json.dumps(result, indent=2))
-    if result.get("review_link"):
-        print(f"\nReview link (paste into the Chinese DB's `Frame.io link` field, set Status: In review):\n  {result['review_link']}")
+    rec_path = scratch / "frameio_review.json"
+    rec = (json.loads(rec_path.read_text(encoding="utf-8")) if rec_path.exists()
+           else {"versions": {}, "stack_id": None, "share_id": None, "review_link": None})
+    label = args.version or "v1"
+
+    account_id = frameio._account_id(cfg)
+    prior_assets = list(rec["versions"].values())
+    up = frameio.upload_file_for_review(out["cndub_mp4"])
+    new_asset = up["asset_id"]
+    rec["versions"][label] = new_asset
+
+    # Fold the new cut into a version stack with the previous cut(s).
+    if rec.get("stack_id"):
+        frameio.add_to_version_stack(cfg, account_id, new_asset, rec["stack_id"])  # v3+
+    elif prior_assets:
+        folder = frameio._project_root_folder(cfg, account_id)
+        rec["stack_id"] = frameio.create_version_stack(cfg, account_id, folder, prior_assets + [new_asset])
+        # first stack: retire the single-file share so the stack gets its own
+        if rec.get("share_id"):
+            frameio.delete_share(cfg, account_id, rec["share_id"])
+            rec["share_id"] = rec["review_link"] = None
+
+    # One review share, on the stack when there is one; reuse it across versions
+    # (a version stack's share auto-shows the newest version).
+    target = rec.get("stack_id") or new_asset
+    if not rec.get("share_id"):
+        sid, link = frameio._create_review_share(cfg, account_id, target, f"CN dub review — {args.project_id}")
+        rec["share_id"], rec["review_link"] = sid, link
+    rec_path.write_text(json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
+    link = rec.get("review_link") or up["view_url"]
+    (scratch / "review_link.txt").write_text(link, encoding="utf-8")
+
+    print(json.dumps({"version": label, "asset_id": new_asset,
+                      "stack_id": rec.get("stack_id"), "review_link": link}, indent=2))
+    print(f"\nReview link (paste into the Chinese DB's `Frame.io link` field, set Status: In review):\n  {link}")
 
 
 def cmd_review_fetch(args):
