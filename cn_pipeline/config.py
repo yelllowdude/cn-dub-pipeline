@@ -114,6 +114,11 @@ class Config:
         self.whisper_model = raw.get("whisper_model", "small")
         self.ffmpeg_path = self._resolve_ffmpeg(raw.get("ffmpeg_path"))
 
+        # Gain (dB) applied to the music/effects bed when `dub mix-me` lays it
+        # under the Chinese VO. Tunable in config.json without a code change;
+        # +6 dB is ~2x louder. Default -4 keeps it under the voice.
+        self.me_gain_db = float(raw.get("me_gain_db", -4.0))
+
         # Per-run paid-call caps (see cn_pipeline.spend). Defaults are sized
         # so a normal run never notices them: ~10-15 TTS chunks + re-split
         # sub-chunks, and exactly 1 KIE thumbnail clean per video.

@@ -207,7 +207,8 @@ def cmd_dub_mix_me(args):
     out_path = scratch / "dub_master_mixed.wav"
     if not _stage_gate(args, [out_path], [scratch / "dub_master_padded.wav", me_wav]):
         return
-    result = dub.mix_me(scratch / "dub_master_padded.wav", me_wav, out_path)
+    result = dub.mix_me(scratch / "dub_master_padded.wav", me_wav, out_path,
+                        me_gain_db=get_config().me_gain_db)
     print(json.dumps(result, indent=2))
     print(f"wrote {out_path}")
 
