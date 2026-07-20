@@ -32,9 +32,13 @@ SUBTITLE_STYLE = (
 # burns a generated .ass instead, where libass honours per-line overrides and
 # WrapStyle=2 keeps each line unwrapped. Fractions are of the video height so it
 # holds at any resolution.
-CNDUB_ZH_FONT_FRAC = 0.045      # Chinese line height ~= 4.5% of frame height
-CNDUB_EN_FONT_RATIO = 0.66      # English line ~= 66% of the Chinese size
-CNDUB_MARGIN_V_FRAC = 0.04      # baseline ~= 4% of frame height off the bottom
+CNDUB_ZH_FONT_FRAC = 0.0675     # Chinese line height ~= 6.75% of frame height
+                                # (was 0.045; +50% per review — bigger, more legible)
+CNDUB_EN_FONT_RATIO = 0.66      # English line ~= 66% of the Chinese size (scales with it)
+CNDUB_MARGIN_V_FRAC = 0.04      # baseline ~= 4% of frame height off the bottom.
+                                # The block is bottom-anchored (Alignment=2 + this fixed
+                                # margin), so a bigger font grows the block UPWARD while the
+                                # bottom edge stays put — subtitles never creep further down.
 
 
 def _srt_time_to_ass(t: str) -> str:
