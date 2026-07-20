@@ -216,7 +216,7 @@ def cmd_align_dub(args):
     """Forced-align the finished dub audio back onto cue text -> bilingual_cndub.srt."""
     scratch = _scratch(args.project_id)
     project_dir = paths.resolve_project_dir(args.project_id)
-    out = paths.deliverable_paths(project_dir)
+    out = paths.deliverable_paths(project_dir, args.version)
     inputs = [scratch / "dub_master_final.wav", scratch / "finalize_log.json", scratch / "zh.json"]
     if not _stage_gate(args, [out["bilingual_cndub_srt"]], inputs):
         return
@@ -307,7 +307,7 @@ def cmd_render_cndub(args):
     scratch = _scratch(args.project_id)
     project_dir = paths.resolve_project_dir(args.project_id)
     master = paths.effective_master(project_dir, scratch)
-    out = paths.deliverable_paths(project_dir)
+    out = paths.deliverable_paths(project_dir, args.version)
     mixed_path = scratch / "dub_master_mixed.wav"
     zh_vo = mixed_path if mixed_path.exists() else scratch / "dub_master_padded.wav"
     if not _stage_gate(args, [out["cndub_mp4"]], [master, zh_vo, out["bilingual_cndub_srt"]]):
@@ -406,7 +406,7 @@ def cmd_review_submit(args):
     """Upload the finished cndub to Frame.io for native-speaker review and
     print the share link (paste into the Chinese DB's `Frame.io link` field)."""
     project_dir = paths.resolve_project_dir(args.project_id)
-    out = paths.deliverable_paths(project_dir)
+    out = paths.deliverable_paths(project_dir, args.version)
     if not out["cndub_mp4"].exists():
         sys.exit(f"{out['cndub_mp4'].name} not found -- render it before submitting for review")
     result = frameio._api_upload_for_review(out["cndub_mp4"])
@@ -514,6 +514,9 @@ def main():
                            help="redo this stage even if its outputs are up to date "
                                 "(downstream stages then rerun automatically -- their "
                                 "inputs become newer than their outputs)")
+        sub_p.add_argument("--version", default="",
+                           help="revision suffix for deliverables (e.g. v2), so a review "
+                                "re-cut writes {id}_cndub_v2.mp4 without overwriting v1")
         sub_p.set_defaults(func=fn)
         return sub_p
 
