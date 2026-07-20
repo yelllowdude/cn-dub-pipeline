@@ -396,27 +396,27 @@ def _put_upload_part(url: str, chunk: bytes, media_type: str) -> None:
         raise RuntimeError(f"part PUT failed: {put.status_code} {put.text[:200]}")
 
 
-def _try_create_review_share(cfg, account_id: str, file_id: str, name: str):
-    """Best-effort public review share. V4 restricted share-link automation and
-    the create body's `type` discriminator is undocumented, so this may fail;
-    callers fall back to the file's own view_url. Returns (share_id, url) or
-    (None, None). If/when the correct body is confirmed, only this fn changes."""
+def _create_review_share(cfg, account_id: str, file_id: str, name: str):
+    """Create a PUBLIC review share and attach the file; return (share_id, short_url).
+    The V4 share create body is a discriminated schema (verified live):
+      {"data": {"name": ..., "type": "asset", "access": "public"}}
+    -- type='asset' selects the share variant, access must be the "public" enum.
+    The share is created empty, then the file is attached via
+    .../shares/{id}/assets {"data": {"asset_id": ...}}. Best-effort: on any
+    failure returns (None, None) so the caller falls back to the file view_url."""
     try:
         share = _api(
             "POST", f"/accounts/{account_id}/projects/{cfg.frameio_project_id}/shares", cfg,
-            json={"data": {"name": name, "type": "review"}},
+            json={"data": {"name": name, "type": "asset", "access": "public"}},
         )
-    except Exception:
-        return None, None
-    share_id = _first(share, "id")
-    url = _first(share, "short_url", "url", "review_link", "link")
-    if share_id and file_id:
-        try:
+        share_id = _first(share, "id")
+        url = _first(share, "short_url", "url")
+        if share_id and file_id:
             _api("POST", f"/accounts/{account_id}/shares/{share_id}/assets", cfg,
                  json={"data": {"asset_id": file_id}})
-        except Exception:
-            pass
-    return share_id, url
+        return share_id, url
+    except Exception:
+        return None, None
 
 
 def _api_upload_for_review(video_path: Path) -> dict:
@@ -451,7 +451,7 @@ def _api_upload_for_review(video_path: Path) -> dict:
             url = part["url"] if isinstance(part, dict) else part
             _put_upload_part(url, fh.read(psize) if psize else fh.read(), media_type)
 
-    share_id, share_url = _try_create_review_share(
+    share_id, share_url = _create_review_share(
         cfg, account_id, file_id, f"CN dub review — {video_path.stem}")
     return {
         "asset_id": file_id,
