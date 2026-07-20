@@ -328,18 +328,8 @@ def exchange_code_for_tokens(cfg, redirect_or_code: str) -> dict:
 
 def save_refresh_token_to_env(refresh_token: str) -> Path:
     """Persist FRAMEIO_REFRESH_TOKEN into the data-dir .env, replacing any prior line."""
-    from cn_pipeline.config import ENV_PATH
-    lines = ENV_PATH.read_text(encoding="utf-8").splitlines() if ENV_PATH.exists() else []
-    out, found = [], False
-    for ln in lines:
-        if ln.startswith("FRAMEIO_REFRESH_TOKEN="):
-            out.append(f"FRAMEIO_REFRESH_TOKEN={refresh_token}"); found = True
-        else:
-            out.append(ln)
-    if not found:
-        out.append(f"FRAMEIO_REFRESH_TOKEN={refresh_token}")
-    ENV_PATH.write_text("\n".join(out) + "\n", encoding="utf-8")
-    return ENV_PATH
+    from cn_pipeline.config import save_env_var
+    return save_env_var("FRAMEIO_REFRESH_TOKEN", refresh_token)
 
 
 def _headers(cfg, json_body: bool = True) -> dict:

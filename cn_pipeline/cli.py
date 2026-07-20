@@ -18,7 +18,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from cn_pipeline import align, dub, frameio, paths, render, screentext, subtitles, thumbnail
+from cn_pipeline import align, dub, frameio, paths, publish, render, screentext, subtitles, thumbnail
 from cn_pipeline.config import ConfigError, get_config
 
 
@@ -318,6 +318,50 @@ def cmd_render_cndub(args):
     print(f"wrote {out['cndub_mp4']} (audio source: {zh_vo.name}, video source: {master.name})")
 
 
+def cmd_publish_auth(args):
+    """One-time YouTube sign-in for the Chinese channel. Run it with no flags to
+    get the URL; sign in AS yellowdude.zh@gmail.com; re-run with --redirect-url
+    to store the refresh token."""
+    cfg = get_config()
+    if not args.redirect_url:
+        url = publish.build_authorize_url(cfg)
+        print("1) Open this URL and sign in as the CHINESE channel account "
+              "(yellowdude.zh@gmail.com -- not your own):\n")
+        print(f"   {url}\n")
+        print("2) After consent, the browser lands on a http://localhost/?code=... page")
+        print("   that won't load -- copy the FULL URL from the address bar.")
+        print("3) Re-run:  cn-pipeline publish auth --redirect-url '<paste it>'")
+        return
+    tok = publish.exchange_code_for_tokens(cfg, args.redirect_url)
+    path = publish.save_refresh_token(tok["refresh_token"])
+    print(f"Saved YOUTUBE_REFRESH_TOKEN to {path}. YouTube publish is ready.")
+
+
+def cmd_publish_youtube(args):
+    """Upload the CNdub to the Chinese YouTube channel as a PRIVATE draft and
+    print the video link (goes into the Chinese DB's `CNdub YT link`)."""
+    project_dir = paths.resolve_project_dir(args.project_id)
+    out = paths.deliverable_paths(project_dir, args.version)
+    if not out["cndub_mp4"].exists():
+        sys.exit(f"{out['cndub_mp4'].name} not found -- render it before publishing")
+    if not args.title:
+        sys.exit("--title is required (use the Notion row's V2/中配 title)")
+    description = Path(args.description_file).read_text(encoding="utf-8") if args.description_file else ""
+    tags = [t.strip() for t in args.tags.split(",") if t.strip()] if args.tags else None
+    result = publish.upload_youtube_draft(out["cndub_mp4"], args.title, description, tags)
+    print(json.dumps(result, indent=2))
+    print(f"\nPrivate draft uploaded. Link for the Chinese DB's `CNdub YT link`:\n  {result['link']}")
+    print("Flip it public in YouTube Studio when ready.")
+
+
+def cmd_publish_bilibili(args):
+    sys.exit(
+        "Bilibili publish is not implemented yet -- the team is waiting on official "
+        "API access from Bilibili. Once granted, this command will upload both the "
+        "ENsub and CNdub drafts and print their BV links."
+    )
+
+
 def _require_screentext_enabled():
     if not get_config().screentext_enabled:
         sys.exit(
@@ -602,6 +646,18 @@ def main():
     review_fetch.add_argument("--asset-id", dest="asset_id", default=None)
     review_fetch.add_argument("--comments-json", dest="comments_json", default=None)
     add(review_group, "apply", cmd_review_apply)
+
+    publish_group = sub.add_parser("publish").add_subparsers(dest="cmd", required=True)
+    publish_auth = publish_group.add_parser("auth")
+    publish_auth.add_argument("--redirect-url", dest="redirect_url", default=None)
+    publish_auth.set_defaults(func=cmd_publish_auth)
+    publish_yt = add(publish_group, "youtube", cmd_publish_youtube)
+    publish_yt.add_argument("--title", default=None, help="video title (the Notion row's 中配 title)")
+    publish_yt.add_argument("--description-file", dest="description_file", default=None,
+                            help="path to a file holding the CN description")
+    publish_yt.add_argument("--tags", default=None, help="comma-separated CN tags")
+    publish_bili = publish_group.add_parser("bilibili")
+    publish_bili.set_defaults(func=cmd_publish_bilibili)
 
     args = p.parse_args()
     try:

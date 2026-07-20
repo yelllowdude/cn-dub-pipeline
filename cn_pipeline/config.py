@@ -52,6 +52,24 @@ def _load_config() -> dict:
     return json.loads(CONFIG_PATH.read_text())
 
 
+def save_env_var(key: str, value: str) -> Path:
+    """Persist KEY=value into the data-dir .env, replacing any existing line.
+    Used by the one-time auth flows (Frame.io, YouTube) to store refresh tokens
+    so later runs authenticate unattended."""
+    lines = ENV_PATH.read_text(encoding="utf-8").splitlines() if ENV_PATH.exists() else []
+    out, found = [], False
+    for ln in lines:
+        if ln.startswith(f"{key}="):
+            out.append(f"{key}={value}")
+            found = True
+        else:
+            out.append(ln)
+    if not found:
+        out.append(f"{key}={value}")
+    ENV_PATH.write_text("\n".join(out) + "\n", encoding="utf-8")
+    return ENV_PATH
+
+
 class Config:
     def __init__(self):
         _load_env()
@@ -89,6 +107,14 @@ class Config:
         # requires it before an (external) reviewer can view/comment. From .env
         # since it gates access. Empty -> link is open to anyone who has it.
         self.frameio_share_passphrase = os.environ.get("FRAMEIO_SHARE_PASSPHRASE", "")
+
+        # YouTube publish (Chinese channel, yellowdude.zh@gmail.com). Same shape
+        # as the Frame.io auth: a Desktop OAuth client's id/secret plus a refresh
+        # token minted once via `cn-pipeline publish auth` (browser sign-in AS the
+        # channel account). All optional at startup -- only `publish` needs them.
+        self.youtube_client_id = os.environ.get("YOUTUBE_CLIENT_ID", "")
+        self.youtube_client_secret = os.environ.get("YOUTUBE_CLIENT_SECRET", "")
+        self.youtube_refresh_token = os.environ.get("YOUTUBE_REFRESH_TOKEN", "")
         # Must be HTTPS and match a redirect URI pattern registered on the Adobe
         # Web App credential. The `review auth` flow only reads the code back
         # from the browser's address bar, so nothing needs to actually serve it.
