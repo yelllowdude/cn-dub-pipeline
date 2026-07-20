@@ -22,7 +22,7 @@ and say so — don't improvise against the main YouTube database.
   PRIVATE draft; the link exists immediately and a human flips it public in
   YouTube Studio when ready.
 - **Bilibili:** NOT WIRED — waiting on official API access. When it lands,
-  both variants go there (ENsub → `ENsub link`, CNdub → `CNdub link`) and
+  both variants go there (ENsub → `ENsub Bilibili`, CNdub → `CNdub Bilibili`) and
   `cn-pipeline publish bilibili` replaces its current not-implemented stub.
   Until then this skill uploads YouTube only and says so in its report.
 
@@ -39,7 +39,7 @@ human runs this skill (that's deliberate: no status-change side effects).
    that row regardless of the checkbox, but say whether it was checked.
 
 2. **Pre-check each row (mandatory, prevents double-publishing):**
-   - `CNdub YT link` already filled → SKIP the row and report it as already
+   - `CNdub YouTube` already filled → SKIP the row and report it as already
      published; do not upload a duplicate. Leave the checkbox for a human to
      clear (they may have re-checked it deliberately and should see the skip).
    - `Status` is not `Ready to publish` → flag it loudly in the report and
@@ -61,13 +61,17 @@ human runs this skill (that's deliberate: no status-change side effects).
    cn-pipeline publish youtube --project-id {id} [--version vN] \
        --title '{V2 title}' --description-file {tmp} --tags '{tags}'
    ```
-   The command prints `{video_id, link, privacy}`. privacy must come back
-   `private` — anything else is a stop-and-report.
+   The command prints `{video_id, link, privacy, thumbnail}`. privacy must come
+   back `private` — anything else is a stop-and-report. The CN thumbnail
+   (`{id}_cover.jpg` from `/CN/`) is set automatically; if the `thumbnail`
+   field reports a failure, flag it — the human sets it in Studio.
 
 5. **Write back to the Notion row:**
-   - `CNdub YT link` ← the returned link
-   - `CNdub date` ← today
+   - `CNdub YouTube` ← the returned link
    - `Publish requested` ← unchecked
+   - In the page's publish-status reminder block (the callout at the top —
+     see localize-chinese step 10): check the `CNdub YouTube` to-do and
+     strike it through. Leave the Bilibili to-dos alone.
    - Append one line to the page's `# 📋 Run log`: date, "CNdub uploaded to
      YouTube as private draft", the link, and which file version went up.
    - Leave `Status` alone: `Published` means live-to-viewers, and these are

@@ -51,7 +51,7 @@ resolving six real reviewer comments to their exact cues.
 
 - Each re-cut is stacked as a **new version of the same asset**, so reviewers
   flip v1↔v2 (Compare view) and check off old comments; the share `short_url`
-  never changes across versions → the Notion `Frame.io link` stays valid.
+  never changes across versions → the Notion `Review link` stays valid.
 - The share is public + passphrase (`FRAMEIO_SHARE_PASSPHRASE`) because the
   native-speaker reviewer is external to the workspace.
 - Per-project state: `runs/{id}/frameio_review.json`

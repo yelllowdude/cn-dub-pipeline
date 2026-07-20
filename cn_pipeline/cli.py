@@ -349,8 +349,21 @@ def cmd_publish_youtube(args):
     description = Path(args.description_file).read_text(encoding="utf-8") if args.description_file else ""
     tags = [t.strip() for t in args.tags.split(",") if t.strip()] if args.tags else None
     result = publish.upload_youtube_draft(out["cndub_mp4"], args.title, description, tags)
+    # Set the CN thumbnail too -- publishing without it was a review miss. Covers
+    # aren't re-made per re-cut, so fall back to the unversioned one when a
+    # --version render has no cover of its own.
+    cover = out["cover_jpg"]
+    if not cover.exists() and args.version:
+        cover = paths.deliverable_paths(project_dir)["cover_jpg"]
+    if cover.exists():
+        thumb = publish.set_thumbnail(result["video_id"], cover)
+        result["thumbnail"] = thumb["detail"]
+        if not thumb["ok"]:
+            print(f"WARNING: video uploaded but thumbnail failed -- {thumb['detail']}", file=sys.stderr)
+    else:
+        result["thumbnail"] = "no cover file found -- set it in Studio"
     print(json.dumps(result, indent=2))
-    print(f"\nPrivate draft uploaded. Link for the Chinese DB's `CNdub YT link`:\n  {result['link']}")
+    print(f"\nPrivate draft uploaded. Link for the Chinese DB's `CNdub YouTube` property:\n  {result['link']}")
     print("Flip it public in YouTube Studio when ready.")
 
 
