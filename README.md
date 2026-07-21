@@ -14,6 +14,34 @@ The machine internals live in the second half and in `docs/`.
 
 ### How a video gets localized
 
+```mermaid
+flowchart TD
+    Start(["a finished English video"]) --> Loc["“localize [video] for Chinese”"]
+    Loc --> Rev{{"a native speaker reviews it<br>on Frame.io"}}
+    Rev --> Q{"good to publish?"}
+
+    Q -->|"not yet"| Fix["“apply the review feedback”"]
+    Fix -. "new version, same link" .-> Rev
+
+    Q -->|"approved"| Pub["“publish [video] to Chinese channels”"]
+    Pub --> YT{{"flip it public<br>in YouTube Studio"}}
+    Pub --> BILI{{"upload it by hand<br>to Bilibili"}}
+    YT --> Live(["live on the Chinese channel"])
+    BILI --> Live
+
+    classDef say fill:#E6F1FB,stroke:#185FA5,color:#0C447C;
+    classDef gate fill:#FAEEDA,stroke:#BA7517,color:#633806;
+    classDef neutral fill:#F1EFE8,stroke:#5F5E5A,color:#2C2C2A;
+    classDef done fill:#E1F5EE,stroke:#0F6E56,color:#085041;
+
+    class Loc,Fix,Pub say
+    class Rev,YT,BILI gate
+    class Start,Q neutral
+    class Live done
+```
+
+> 🟦 what you type to Claude   ·   🟧 you do it by hand   ·   everything else runs automatically
+
 You talk to Claude in plain language. There are only three phrases to know:
 
 1. **"localize {project-id} for Chinese"** — Claude transcribes the English,
