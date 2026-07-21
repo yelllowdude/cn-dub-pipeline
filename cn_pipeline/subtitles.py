@@ -124,6 +124,54 @@ def build_mono_srt(segments: list[dict], zh_lines: list[str], en_out: Path, zh_o
     Path(zh_out).write_text("\n".join(zh_out_lines), encoding="utf-8")
 
 
+# Native dub mode: cues are derived FROM the finished Chinese dub, so they
+# split at natural Chinese sentence boundaries -- not inherited from the
+# English cue grid (that inheritance is the "translationese rhythm" root
+# cause native mode exists to fix; see dub_native.py).
+ZH_MAX_CHARS = 25   # one comfortable subtitle line of CJK
+# ASCII ! and ? count as enders (mixed-width scripts happen); ASCII "." does
+# NOT -- it appears inside decimals (4.7星) and English product names.
+_ZH_SENTENCE_END = "。！？；!?"
+_ZH_SOFT_BREAK = ",，、"
+
+
+def split_zh_cues(text: str) -> list[str]:
+    """Split one spoken-Chinese passage into subtitle-sized cue lines.
+    Hard-break after sentence enders; a sentence still longer than
+    ZH_MAX_CHARS soft-breaks after commas/pauses, keeping the punctuation
+    with the text before the break."""
+    sentences, buf = [], ""
+    for ch in text.strip():
+        buf += ch
+        if ch in _ZH_SENTENCE_END:
+            sentences.append(buf)
+            buf = ""
+    if buf.strip():
+        sentences.append(buf)
+
+    cues = []
+    for s in sentences:
+        s = s.strip()
+        if not s:
+            continue
+        if len(s) <= ZH_MAX_CHARS:
+            cues.append(s)
+            continue
+        piece = ""
+        for ch in s:
+            piece += ch
+            if ch in _ZH_SOFT_BREAK and len(piece) >= ZH_MAX_CHARS // 2:
+                cues.append(piece)
+                piece = ""
+        if piece.strip():
+            # a trailing fragment too short to stand alone joins the previous cue
+            if cues and len(piece) < 4:
+                cues[-1] += piece
+            else:
+                cues.append(piece)
+    return cues
+
+
 def load_segments(path: Path) -> list[dict]:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 

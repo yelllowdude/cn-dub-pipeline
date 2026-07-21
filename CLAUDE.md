@@ -31,6 +31,14 @@ and then drives the CLI.
   mispronounces 腘; this exact regression came back from a native reviewer),
   and **product names stay in English** ("Pistol Squat Cheat Sheet", never
   手枪式深蹲小抄 — buyers must be able to find the SKU by name).
+- **Two dub modes** (per-project `runs/{id}/project.json`, absent = `cue_locked`):
+  `cue_locked` is the classic English-cue-timed path; `native` (dub_native.py +
+  anchors.py) writes natural Chinese passages first, TTS at natural pace synced
+  to operator-picked visual anchors (atempo hard-capped at 1.06 — overflow is
+  fixed by tightening WORDING, never speed), then derives Chinese-only subtitles
+  FROM the dub. Reviewer feedback "rushed / feels off" on a cue-locked cut is a
+  signal to pilot native mode, not to keep patching lines. Never flip an
+  existing project's mode mid-flight.
 - **CN dub subtitles burn from a generated .ass, not SRT** (`build_cndub_ass`):
   ffmpeg's SRT reader strips inline `{\fs}` overrides, so SRT+force_style
   cannot size the Chinese and English lines differently. The .ass gives one

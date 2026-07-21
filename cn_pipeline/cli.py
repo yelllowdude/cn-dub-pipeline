@@ -18,12 +18,21 @@ import subprocess
 import sys
 from pathlib import Path
 
-from cn_pipeline import align, dub, frameio, paths, publish, render, screentext, subtitles, thumbnail
+from cn_pipeline import align, anchors, dub, dub_native, frameio, paths, publish, render, screentext, subtitles, thumbnail
 from cn_pipeline.config import ConfigError, get_config
 
 
 def _scratch(project_id: str) -> Path:
     return paths.run_scratch_dir(project_id)
+
+
+def _dub_mode(scratch: Path) -> str:
+    """Per-project dub mode from runs/{id}/project.json. Absent file or key =
+    "cue_locked", so every pre-native project keeps its exact behavior."""
+    pj = scratch / "project.json"
+    if pj.exists():
+        return json.loads(pj.read_text(encoding="utf-8")).get("dub_mode", "cue_locked")
+    return "cue_locked"
 
 
 def _stage_gate(args, outputs: list[Path], inputs: list[Path] = ()) -> bool:
@@ -146,6 +155,24 @@ def _print_capped_status(log: dict):
 
 def cmd_dub_generate(args):
     scratch = _scratch(args.project_id)
+    if _dub_mode(scratch) == "native":
+        inputs = [scratch / "anchors.json", scratch / "zh_script.json"]
+        if not _stage_gate(args, [scratch / "native_generate_log.json"], inputs):
+            return
+        anchor_data = anchors.load_anchors(scratch / "anchors.json")
+        passages = dub_native.load_script(scratch / "zh_script.json", anchor_data)
+        log = dub_native.generate(anchor_data, passages, scratch)
+        for e in log["passages"]:
+            extra = (f" -- OVERFLOW by {e['over_ms']}ms, tighten to ~{e['target_chars']} chars"
+                     if e["status"] == "overflow"
+                     else f" (atempo {e['atempo']})" if e["status"] == "tempo_fit" else "")
+            print(f"  {e['anchor_id']}: {e['status']}{extra}")
+        if log["overflows"]:
+            print(f"\n{len(log['overflows'])} passage(s) overflow -- tighten their wording in "
+                  "zh_script.json, re-ingest, and re-run (the cache only re-buys edited passages).")
+        else:
+            print("\nall passages fit -- run `dub finalize`")
+        return
     gen_log_path = scratch / "generate_log.json"
     if not _stage_gate(args, [gen_log_path], [scratch / "segments.json", scratch / "zh.json"]):
         # the orchestrator still needs the capped verdict to pick the next step
@@ -159,6 +186,20 @@ def cmd_dub_generate(args):
 
 def cmd_dub_fix(args):
     scratch = _scratch(args.project_id)
+    if _dub_mode(scratch) == "native":
+        # Native mode has no re-split mechanism: the fix for an overflow is
+        # WORDING, not chunking. Print the tightening queue and stop.
+        log = json.loads((scratch / "native_generate_log.json").read_text(encoding="utf-8"))
+        overflows = [e for e in log["passages"] if e["status"] == "overflow"]
+        if not overflows:
+            print("no overflows -- nothing to fix; run `dub finalize`")
+            return
+        print("native mode: fix these by TIGHTENING the passage wording in zh_script.json "
+              "(then re-ingest + `dub generate`):")
+        for e in overflows:
+            print(f"  {e['anchor_id']}: {e['chars']} chars, over by {e['over_ms']}ms "
+                  f"-> aim for ~{e['target_chars']} chars")
+        return
     if not _stage_gate(args, [scratch / "fix_log.json"], [scratch / "generate_log.json"]):
         return
     segs = subtitles.load_segments(scratch / "segments.json")
@@ -170,6 +211,16 @@ def cmd_dub_fix(args):
 
 def cmd_dub_finalize(args):
     scratch = _scratch(args.project_id)
+    if _dub_mode(scratch) == "native":
+        inputs = [scratch / "native_generate_log.json", scratch / "zh_script.json"]
+        if not _stage_gate(args, [scratch / "dub_master_final.wav",
+                                  scratch / "native_finalize_log.json"], inputs):
+            return
+        anchor_data = anchors.load_anchors(scratch / "anchors.json")
+        passages = dub_native.load_script(scratch / "zh_script.json", anchor_data)
+        out = dub_native.finalize(anchor_data, passages, scratch)
+        print(f"wrote {out}")
+        return
     inputs = [scratch / "generate_log.json", scratch / "fix_log.json",
               scratch / "segments.json", scratch / "zh.json"]
     if not _stage_gate(args, [scratch / "dub_master_final.wav", scratch / "finalize_log.json"], inputs):
@@ -214,8 +265,13 @@ def cmd_dub_mix_me(args):
 
 
 def cmd_align_dub(args):
-    """Forced-align the finished dub audio back onto cue text -> bilingual_cndub.srt."""
+    """Forced-align the finished dub audio back onto cue text -> bilingual_cndub.srt.
+    In native mode the cue text comes from the dub-derived Chinese cues
+    (zh_cues.json), not the English cue grid -- see _align_dub_native."""
     scratch = _scratch(args.project_id)
+    if _dub_mode(scratch) == "native":
+        _align_dub_native(args, scratch)
+        return
     project_dir = paths.resolve_project_dir(args.project_id)
     out = paths.deliverable_paths(project_dir, args.version)
     inputs = [scratch / "dub_master_final.wav", scratch / "finalize_log.json", scratch / "zh.json"]
@@ -263,6 +319,161 @@ def cmd_align_dub(args):
     print(f"global monotonic clamp: {overlaps} overlap(s) fixed")
     align.write_aligned_srt(clamped, out["bilingual_cndub_srt"])
     print(f"wrote {len(clamped)} cues to {out['bilingual_cndub_srt']}")
+
+
+def _align_dub_native(args, scratch):
+    """Native mode: subtitles FROM the dub. Per passage, extract its span of
+    the assembled track (offsets from native_finalize_log.json -- the same
+    timeline finalize built, so cues can't slide off the voice) and force-align
+    the dub-derived Chinese cue lines. English lines are empty by design:
+    native-mode CN dub ships Chinese-only subs (the ENsub variant stays the
+    bilingual option)."""
+    project_dir = paths.resolve_project_dir(args.project_id)
+    out = paths.deliverable_paths(project_dir, args.version)
+    inputs = [scratch / "dub_master_final.wav", scratch / "native_finalize_log.json",
+              scratch / "zh_cues.json"]
+    if not _stage_gate(args, [out["bilingual_cndub_srt"]], inputs):
+        return
+    cfg = get_config()
+    fin_log = json.loads((scratch / "native_finalize_log.json").read_text(encoding="utf-8"))
+    cue_groups = json.loads((scratch / "zh_cues.json").read_text(encoding="utf-8"))
+    offsets = {e["anchor_id"]: e for e in fin_log["passages"]}
+
+    align_dir = scratch / "align_passages"
+    align_dir.mkdir(exist_ok=True)
+    all_cues = []
+    for group in cue_groups:
+        aid = group["anchor_id"]
+        entry = offsets[aid]
+        start_ms = entry["placed_start_ms"]
+        dur_ms = entry["speech_end_ms"] - start_ms
+        span_path = align_dir / f"{aid}.wav"
+        subprocess.run([cfg.ffmpeg_path, "-y", "-i", str(scratch / "dub_master_final.wav"),
+                        "-ss", f"{start_ms / 1000:.3f}", "-t", f"{dur_ms / 1000:.3f}",
+                        "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", str(span_path)],
+                       capture_output=True, check=True)
+        zh_lines = group["lines"]
+        cues = align.force_align_chunk(span_path, zh_lines, [""] * len(zh_lines), start_ms, dur_ms)
+        all_cues.extend(cues)
+        print(f"passage {aid}: {len(zh_lines)} cues aligned")
+
+    clamped, overlaps = align.clamp_monotonic(all_cues)
+    print(f"global monotonic clamp: {overlaps} overlap(s) fixed")
+    align.write_aligned_srt(clamped, out["bilingual_cndub_srt"])
+    print(f"wrote {len(clamped)} Chinese-only cues to {out['bilingual_cndub_srt']}")
+
+
+def cmd_mode_set(args):
+    """Set the per-project dub mode (native | cue_locked). Stored in
+    runs/{id}/project.json so existing projects default to cue_locked."""
+    scratch = _scratch(args.project_id)
+    pj = scratch / "project.json"
+    data = json.loads(pj.read_text(encoding="utf-8")) if pj.exists() else {}
+    data["dub_mode"] = args.dub_mode
+    pj.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    print(f"dub_mode = {args.dub_mode} ({pj})")
+
+
+def cmd_mode_show(args):
+    print(f"dub_mode = {_dub_mode(_scratch(args.project_id))}")
+
+
+def cmd_anchors_detect(args):
+    """Native mode: mechanical anchor CANDIDATES (scene cuts + English speech
+    gaps). The operator picks the final anchors.json by hand -- see
+    anchors.py's docstring for why selection is never automated."""
+    scratch = _scratch(args.project_id)
+    if _dub_mode(scratch) != "native":
+        print("anchors detect is a native-mode stage -- run `mode set --dub-mode native` first")
+        return
+    out_path = scratch / "anchor_candidates.json"
+    if not _stage_gate(args, [out_path], [scratch / "segments.json"]):
+        return
+    cfg = get_config()
+    project_dir = paths.resolve_project_dir(args.project_id)
+    master = paths.effective_master(project_dir, scratch)
+    segs = subtitles.load_segments(scratch / "segments.json")
+    video_ms = round(render.probe_duration_ms(cfg.ffmpeg_path, master))
+    print("detecting scene cuts (one decode pass, ~realtime/4) ...")
+    cuts = anchors.detect_scene_cuts(cfg.ffmpeg_path, master)
+    gaps = anchors.detect_speech_gaps(segs)
+    out_path.write_text(json.dumps(
+        {"video_ms": video_ms, "scene_cuts_ms": cuts, "speech_gaps": gaps},
+        ensure_ascii=False, indent=2), encoding="utf-8")
+    lo, hi = anchors.ANCHOR_DENSITY_HINT_S
+    print(f"wrote {out_path}: {len(cuts)} scene cuts, {len(gaps)} speech gaps.")
+    print(f"Now write {scratch / 'anchors.json'} by hand -- aim for one anchor per "
+          f"{lo}-{hi}s at moments that MUST sync (product shots, on-screen text, "
+          f"chapter turns), then run `anchors validate`.")
+
+
+def cmd_anchors_validate(args):
+    scratch = _scratch(args.project_id)
+    path = scratch / "anchors.json"
+    if not path.exists():
+        sys.exit(f"{path} not found -- write it first (see anchor_candidates.json for suggestions)")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    n_segs = None
+    seg_path = scratch / "segments.json"
+    if seg_path.exists():
+        n_segs = len(subtitles.load_segments(seg_path))
+    errors = anchors.validate_anchors(data, n_segments=n_segs)
+    if errors:
+        sys.exit("anchors.json problems:\n  " + "\n  ".join(errors))
+    wins = anchors.windows(data)
+    for w in wins:
+        print(f"  {w['anchor_id']}: {w['start_ms'] / 1000:.1f}s -> {w['end_ms'] / 1000:.1f}s "
+              f"({(w['end_ms'] - w['start_ms']) / 1000:.1f}s window)")
+    print(f"OK: {len(wins)} windows")
+
+
+def cmd_ingest_script(args):
+    """Native mode: ingest the operator's zh_script.json (one natural
+    spoken-Chinese paragraph per anchor window)."""
+    scratch = _scratch(args.project_id)
+    anchor_data = anchors.load_anchors(scratch / "anchors.json")
+    src = Path(args.script_json)
+    passages = dub_native.load_script(src, anchor_data)  # validates 1:1 + order
+    shutil.copy(src, scratch / "zh_script.json")
+    total = sum(len(p["text"]) for p in passages)
+    print(f"ingested {len(passages)} passages ({total} chars)")
+
+
+def cmd_split_zh_cues(args):
+    """Native mode: derive subtitle cue lines from the Chinese script at
+    natural sentence boundaries -> zh_cues.json (consumed by align-dub)."""
+    scratch = _scratch(args.project_id)
+    out_path = scratch / "zh_cues.json"
+    if not _stage_gate(args, [out_path], [scratch / "zh_script.json"]):
+        return
+    anchor_data = anchors.load_anchors(scratch / "anchors.json")
+    passages = dub_native.load_script(scratch / "zh_script.json", anchor_data)
+    groups = [{"anchor_id": p["anchor_id"], "lines": subtitles.split_zh_cues(p["text"])}
+              for p in passages]
+    out_path.write_text(json.dumps(groups, ensure_ascii=False, indent=2), encoding="utf-8")
+    n = sum(len(g["lines"]) for g in groups)
+    print(f"wrote {n} cue lines across {len(groups)} passages to {out_path}")
+
+
+def cmd_dub_verify_anchors(args):
+    """Native-mode close-out gate: prove from the assembled AUDIO that every
+    passage starts within tolerance of its anchor and never bleeds past the
+    next one. Run alongside `render verify`."""
+    scratch = _scratch(args.project_id)
+    if _dub_mode(scratch) != "native":
+        print("verify-anchors is a native-mode gate; cue_locked projects use `render verify` alone")
+        return
+    anchor_data = anchors.load_anchors(scratch / "anchors.json")
+    results = dub_native.verify_anchors(anchor_data, scratch)
+    bad = [r for r in results if not r["ok"]]
+    for r in results:
+        mark = "ok " if r["ok"] else "FAIL"
+        print(f"  [{mark}] {r['anchor_id']}: onset drift {r['onset_drift_ms']:+d}ms, "
+              f"slack {r['slack_ms']}ms")
+    if bad:
+        sys.exit(f"FAIL: {len(bad)} anchor(s) out of tolerance "
+                 f"(±{dub_native.ANCHOR_TOLERANCE_MS}ms) -- diagnose before rendering")
+    print(f"PASS: all {len(results)} anchors within ±{dub_native.ANCHOR_TOLERANCE_MS}ms")
 
 
 def cmd_thumb_clean(args):
@@ -616,16 +827,31 @@ def main():
     preflight_p.add_argument("--project-id", required=True)
     preflight_p.set_defaults(func=cmd_preflight)
 
+    mode_group = sub.add_parser("mode").add_subparsers(dest="cmd", required=True)
+    mode_set = add(mode_group, "set", cmd_mode_set)
+    mode_set.add_argument("--dub-mode", required=True, dest="dub_mode",
+                          choices=["cue_locked", "native"],
+                          help="cue_locked = classic English-cue-timed dub; native = "
+                               "dub-first at natural pace, anchor-synced (see dub_native.py)")
+    add(mode_group, "show", cmd_mode_show)
+
     align_group = sub.add_parser("align").add_subparsers(dest="cmd", required=True)
     add(align_group, "extract-audio", cmd_extract_audio)
     add(align_group, "transcribe", cmd_transcribe)
     add(align_group, "align-dub", cmd_align_dub)
+
+    anchors_group = sub.add_parser("anchors").add_subparsers(dest="cmd", required=True)
+    add(anchors_group, "detect", cmd_anchors_detect)
+    add(anchors_group, "validate", cmd_anchors_validate)
 
     subs_group = sub.add_parser("subtitles").add_subparsers(dest="cmd", required=True)
     add(subs_group, "split-cues", cmd_split_cues)
     ingest = add(subs_group, "ingest-translation", cmd_ingest_translation)
     ingest.add_argument("--zh-json", required=True, dest="zh_json")
     add(subs_group, "build-srt", cmd_build_srt)
+    ingest_script = add(subs_group, "ingest-script", cmd_ingest_script)
+    ingest_script.add_argument("--script-json", required=True, dest="script_json")
+    add(subs_group, "split-zh-cues", cmd_split_zh_cues)
 
     dub_group = sub.add_parser("dub").add_subparsers(dest="cmd", required=True)
     add(dub_group, "generate", cmd_dub_generate)
@@ -633,6 +859,7 @@ def main():
     add(dub_group, "finalize", cmd_dub_finalize)
     add(dub_group, "tighten", cmd_dub_tighten)
     add(dub_group, "mix-me", cmd_dub_mix_me)
+    add(dub_group, "verify-anchors", cmd_dub_verify_anchors)
 
     thumb_group = sub.add_parser("thumbnail").add_subparsers(dest="cmd", required=True)
     add(thumb_group, "clean", cmd_thumb_clean)
