@@ -79,73 +79,63 @@ voice API — is enforced by the machinery, not by you remembering things.
 
 ---
 
-## Part 2 · Getting set up
+## Part 2 · Setup (once per machine)
 
-You need a Mac, about 15 minutes, and three things before you start:
+You don't follow a checklist — you hand the job to Claude. In the Claude
+desktop app (signed into the Gravgear team), start a chat and paste this:
 
-- the **Claude desktop app** (or Claude Code in a terminal), signed in with
-  your Gravgear team account
-- **Google Drive for desktop**, signed in, with the `General` shared drive
-  available
-- your **two API keys** from Wayne (ElevenLabs + KIE, via password manager)
+> Set up cn-dub-pipeline on my Mac from https://github.com/yelllowdude/cn-dub-pipeline —
+> follow the setup steps in its README: install the tools it needs, register
+> and enable the plugin, run `cn-pipeline-setup`, fill in my Google Drive
+> path, then run the validation dry-run. Stop and ask me whenever there's
+> something only I can do.
 
-Then pick ONE of the two paths below.
+Approve the commands as they scroll by. Claude does all the mechanical work
+and pauses at the **only three things it can't do for you**:
 
-### Path A — Claude desktop app (for everyone)
+1. **Paste the API keys** — ElevenLabs + KIE, from Wayne via password manager.
+   You type them yourself; Claude never handles your secrets.
+2. **Sign into Google Drive for desktop** (with the `General` shared drive) —
+   a one-time login.
+3. **Restart the app once** — a freshly-registered plugin only loads on
+   restart, and Claude can't restart the app it's running in.
 
-No terminal. You paste two messages and fill in two blanks; Claude does the
-actual installing.
+That's the whole thing: one prompt, plus those three. When it's done, ask
+"what skills are available?" — `localize-chinese` means you're ready.
 
-**Step 1.** Open the Claude app, start a new conversation, and paste this
-whole block:
+<details>
+<summary><b>The exact steps</b> — what Claude follows, and how to do it by hand</summary>
 
-> Set up the cn-dub-pipeline plugin on this Mac for me:
-> 1. Make sure Homebrew is installed, then `brew install ffmpeg-full python@3.14`.
-> 2. In `~/.claude/settings.json`, add the marketplace and enable the plugin:
->    `extraKnownMarketplaces: {"gravgear-tools": {"source": {"source": "github", "repo": "yelllowdude/cn-dub-pipeline"}}}`
->    and `enabledPlugins: {"cn-dub-pipeline@gravgear-tools": true}` (merge with
->    whatever is already there, don't overwrite other settings).
-> 3. Tell me when to restart the app.
+Prerequisites: macOS; the Claude desktop app (or Claude Code CLI) signed into
+the Gravgear team; Google Drive for desktop signed in.
 
-Approve what it asks to run, and restart the app when it says so.
+1. **Install the tools:** `brew install ffmpeg-full python@3.14` (install
+   Homebrew first if needed: https://brew.sh). It must be `ffmpeg-full`, not
+   plain `ffmpeg` — only that formula has libass (subtitle burn-in) and the
+   videotoolbox hardware encoder.
+2. **Register + enable the plugin** by merging into `~/.claude/settings.json`
+   (don't overwrite other settings):
+   - `extraKnownMarketplaces`: `{"gravgear-tools": {"source": {"source": "github", "repo": "yelllowdude/cn-dub-pipeline"}}}`
+   - `enabledPlugins`: `{"cn-dub-pipeline@gravgear-tools": true}`
 
-**Step 2.** In a fresh conversation, paste:
+   Terminal alternative (Claude Code CLI): `/plugin marketplace add yelllowdude/cn-dub-pipeline`
+   then `/plugin install cn-dub-pipeline@gravgear-tools`.
+3. **Restart the Claude app** so the plugin loads. *(human)*
+4. **Run `cn-pipeline-setup`** — creates the Python venv plus starter `.env`
+   and `config.json` under `~/.claude/plugins/data/…` (outside the synced
+   plugin files, so a plugin update never wipes them). It prints the exact
+   path.
+5. **Fill in the two files:** the API keys in `.env` *(human — secrets)*;
+   `drive_root` in `config.json` = `/Users/<your-mac-username>/Library/CloudStorage/GoogleDrive-wayne@thegravgear.com/Shared drives/General`
+   (differs from anyone else's only by the username — Claude can fill this in).
+6. **Confirm:** ask "what skills are available?" — `localize-chinese` should
+   be listed.
+7. **Validate before the first real run:** dry-run against a project that's
+   already been localized (ask Wayne for the known-good baseline) and check
+   the output durations match the published files in its Drive `/CN/` folder.
+   `docs/VALIDATE.md` is the copy-paste runbook.
 
-> run cn-pipeline-setup
-
-Claude creates the working folders and then shows you exactly where to paste
-your two API keys and confirms your Google Drive path. Paste the keys where
-it points you (you type the keys, not Claude — they're secrets).
-
-**Step 3.** Check it worked. Ask:
-
-> what skills are available?
-
-If `localize-chinese` is in the list, you're done. Ready for
-`localize {project-id} for Chinese`.
-
-### Path B — terminal (Claude Code CLI)
-
-Same result, four commands:
-
-```
-brew install ffmpeg-full python@3.14      # Homebrew first if needed: https://brew.sh
-claude                                     # then inside the session:
-/plugin marketplace add yelllowdude/cn-dub-pipeline
-/plugin install cn-dub-pipeline@gravgear-tools
-```
-
-Then say `run cn-pipeline-setup`, add your two keys and Drive path to the
-`.env` / `config.json` it creates (it prints the exact location — under
-`~/.claude/plugins/data/`, safe from plugin updates), and confirm
-`localize-chinese` shows up under "what skills are available?".
-
-### Before the first real run
-
-Do one dry run against a project that's already been localized (ask Wayne
-which — there's a known-good baseline) and check the output durations match
-the published files in that project's Drive `/CN/` folder.
-`docs/VALIDATE.md` is the copy-paste runbook.
+</details>
 
 ---
 
