@@ -128,47 +128,64 @@ def build_mono_srt(segments: list[dict], zh_lines: list[str], en_out: Path, zh_o
 # split at natural Chinese sentence boundaries -- not inherited from the
 # English cue grid (that inheritance is the "translationese rhythm" root
 # cause native mode exists to fix; see dub_native.py).
-ZH_MAX_CHARS = 25   # one comfortable subtitle line of CJK
+# One subtitle line of CJK. The frame fits ~24 chars at the current CN-dub
+# font size (6.75% of height, 16:9, 60px side margins) -- 20 keeps a margin.
+# Reviewer round 2026-07-21: long lines are hard to follow and one ran off
+# screen, so the cap is HARD -- no cue may exceed it, ever.
+ZH_MAX_CHARS = 20
 # ASCII ! and ? count as enders (mixed-width scripts happen); ASCII "." does
 # NOT -- it appears inside decimals (4.7星) and English product names.
 _ZH_SENTENCE_END = "。！？；!?"
+_ZH_MID_BREAK = ":：—…"    # colon/dash/ellipsis: clause turns worth their own cue
 _ZH_SOFT_BREAK = ",，、"
+_MIN_FRAGMENT = 4
+
+
+def _split_at(text: str, marks: str) -> list[str]:
+    parts, buf = [], ""
+    for ch in text:
+        buf += ch
+        if ch in marks:
+            parts.append(buf)
+            buf = ""
+    if buf:
+        parts.append(buf)
+    return parts
 
 
 def split_zh_cues(text: str) -> list[str]:
-    """Split one spoken-Chinese passage into subtitle-sized cue lines.
-    Hard-break after sentence enders; a sentence still longer than
-    ZH_MAX_CHARS soft-breaks after commas/pauses, keeping the punctuation
-    with the text before the break."""
-    sentences, buf = [], ""
-    for ch in text.strip():
-        buf += ch
-        if ch in _ZH_SENTENCE_END:
-            sentences.append(buf)
-            buf = ""
-    if buf.strip():
-        sentences.append(buf)
-
+    """Split one spoken-Chinese passage into subtitle cue lines, HARD-capped
+    at ZH_MAX_CHARS. Break priority: sentence enders > colon/dash > comma >
+    forced break at the cap (a comma-less stretch must still break). Tiny
+    trailing fragments merge into the previous cue when the cap allows."""
     cues = []
-    for s in sentences:
-        s = s.strip()
-        if not s:
+    for sentence in _split_at(text.strip(), _ZH_SENTENCE_END):
+        sentence = sentence.strip()
+        if not sentence:
             continue
-        if len(s) <= ZH_MAX_CHARS:
-            cues.append(s)
-            continue
-        piece = ""
-        for ch in s:
-            piece += ch
-            if ch in _ZH_SOFT_BREAK and len(piece) >= ZH_MAX_CHARS // 2:
-                cues.append(piece)
-                piece = ""
-        if piece.strip():
-            # a trailing fragment too short to stand alone joins the previous cue
-            if cues and len(piece) < 4:
-                cues[-1] += piece
+        pieces = [sentence]
+        for marks in (_ZH_MID_BREAK, _ZH_SOFT_BREAK):
+            if all(len(p) <= ZH_MAX_CHARS for p in pieces):
+                break
+            pieces = [q for p in pieces
+                      for q in ([p] if len(p) <= ZH_MAX_CHARS else _split_at(p, marks))]
+        # forced break: whatever still exceeds the cap gets chopped at the cap
+        forced = []
+        for p in pieces:
+            while len(p) > ZH_MAX_CHARS:
+                forced.append(p[:ZH_MAX_CHARS])
+                p = p[ZH_MAX_CHARS:]
+            if p:
+                forced.append(p)
+        # merge tiny fragments into their predecessor when the cap allows
+        for p in forced:
+            p = p.strip()
+            if not p:
+                continue
+            if cues and len(p) < _MIN_FRAGMENT and len(cues[-1]) + len(p) <= ZH_MAX_CHARS:
+                cues[-1] += p
             else:
-                cues.append(piece)
+                cues.append(p)
     return cues
 
 

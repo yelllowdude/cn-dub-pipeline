@@ -476,6 +476,16 @@ def cmd_dub_verify_anchors(args):
         mark = "ok " if r["ok"] else "FAIL"
         print(f"  [{mark}] {r['anchor_id']}: onset drift {r['onset_drift_ms']:+d}ms, "
               f"slack {r['slack_ms']}ms")
+    # beat placement report: how tightly each beat landed on its visual target
+    fin_log = json.loads((scratch / "native_finalize_log.json").read_text(encoding="utf-8"))
+    beats = [b for b in fin_log.get("beats", []) if b.get("drift_ms") is not None]
+    if beats:
+        on_time = sum(1 for b in beats if abs(b["drift_ms"]) <= 500)
+        late = [b for b in beats if b["drift_ms"] > 500]
+        worst = max(beats, key=lambda b: abs(b["drift_ms"]))
+        print(f"  beats: {on_time}/{len(beats)} on their visual target (±500ms); "
+              f"{len(late)} flowed late (never stretched); "
+              f"worst drift {worst['drift_ms']:+d}ms at {worst['anchor_id']}/beat{worst['beat']}")
     if bad:
         sys.exit(f"FAIL: {len(bad)} anchor(s) out of tolerance "
                  f"(±{dub_native.ANCHOR_TOLERANCE_MS}ms) -- diagnose before rendering")

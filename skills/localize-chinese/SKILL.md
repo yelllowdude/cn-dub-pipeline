@@ -257,14 +257,18 @@ publish — is unchanged):
    operator) review the proposal against the picture and adjust only where a
    must-sync moment is missing or misplaced (product shots, on-screen text,
    chapter turns). Never ask the user to pick anchors.** Then `anchors validate`.
-2. **Write the native script — live.** One natural spoken-Chinese paragraph
-   per anchor window in `zh_script.json` (`{"passages": [{"anchor_id",
-   "text"}]}`). Ground each passage in the English VO for that window
-   (`en_seg_range`): carry over the essential meaning, facts, numbers, jokes
-   and beats — but never translate word-by-word or clause-by-clause. Extract
-   the essence, then write the Chinese as if the video had never had an
-   English voiceover. Glossary still law; product names stay English. Aim for
-   ~90% of each window at natural pace.
+2. **Write the native script — live, BEAT-TAGGED.** One natural
+   spoken-Chinese paragraph per anchor window in `zh_script.json`, written as
+   beats: `{"passages": [{"anchor_id", "beats": [{"text", "en_seg"}]}]}` —
+   each beat is 1–2 sentences tagged with the English segment whose meaning it
+   carries. The English cue grid is the visual beat map, so finalize places
+   each beat on its segment's timestamp: pauses land where the original
+   narrator breathed instead of pooling as dead air before the next anchor
+   (reviewer-confirmed failure of untagged passages, 2026-07-21). Ground each
+   beat in the English VO's essential meaning, facts, numbers and jokes — but
+   never translate word-by-word. Write the Chinese as if the video never had
+   an English voiceover. Glossary still law; product names stay English. Aim
+   for ~90-95% of each window at natural pace.
    Then: `cn-pipeline subtitles ingest-script --project-id {id} --script-json …`
 3. `cn-pipeline dub generate --project-id {id}` — TTS per passage, natural
    pace. Overflowing passages are flagged with a target char count: **tighten
