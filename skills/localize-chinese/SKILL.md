@@ -234,3 +234,54 @@ per-run caps (`runs/{id}/api_spend.json`, caps in `config.json`), and a
 call past the cap raises instead of spending. If you hit a `SpendCapError`,
 that *is* the flag — report what burned the budget; don't raise the cap or
 delete the counter to push through without the user's say-so.
+
+## Native dub mode (dub-first, anchor-synced) — pilot
+
+The classic sequence above is **cue-locked**: Chinese speech is tempo-forced
+into the English cue grid. Native reviewers consistently read that as "rushed /
+feels off", so there is a second mode that inverts the priority: **write
+natural Chinese first, dub it at natural pace synced to visual anchors, derive
+the subtitles from the finished dub.** Opt in per project:
+
+```
+cn-pipeline mode set --project-id {id} --dub-mode native
+```
+
+Native-mode sequence (replaces steps 3, 6, 7 above; everything else — 
+pre-flight, transcribe, sponsor check, title, thumbnail, M&E, render, review,
+publish — is unchanged):
+
+1. `cn-pipeline anchors detect --project-id {id}` → `anchor_candidates.json`
+   AND an auto-proposed `anchors.json` (scene cuts that land in English speech
+   gaps, 30–75s spacing). **Anchors are automatic most of the time — you (the
+   operator) review the proposal against the picture and adjust only where a
+   must-sync moment is missing or misplaced (product shots, on-screen text,
+   chapter turns). Never ask the user to pick anchors.** Then `anchors validate`.
+2. **Write the native script — live, BEAT-TAGGED.** One natural
+   spoken-Chinese paragraph per anchor window in `zh_script.json`, written as
+   beats: `{"passages": [{"anchor_id", "beats": [{"text", "en_seg"}]}]}` —
+   each beat is 1–2 sentences tagged with the English segment whose meaning it
+   carries. The English cue grid is the visual beat map, so finalize places
+   each beat on its segment's timestamp: pauses land where the original
+   narrator breathed instead of pooling as dead air before the next anchor
+   (reviewer-confirmed failure of untagged passages, 2026-07-21). Ground each
+   beat in the English VO's essential meaning, facts, numbers and jokes — but
+   never translate word-by-word. Write the Chinese as if the video never had
+   an English voiceover. Glossary still law; product names stay English. Aim
+   for ~90-95% of each window at natural pace.
+   Then: `cn-pipeline subtitles ingest-script --project-id {id} --script-json …`
+3. `cn-pipeline dub generate --project-id {id}` — TTS per passage, natural
+   pace. Overflowing passages are flagged with a target char count: **tighten
+   the WORDING** (never the tempo), re-ingest, re-run — the cache only re-buys
+   edited passages. When clean: `dub finalize`, then `dub mix-me` as usual.
+4. `cn-pipeline subtitles split-zh-cues --project-id {id}` → Chinese cue lines
+   at natural sentence breaks, then `align align-dub` (subtitles come FROM the
+   dub; **Chinese-only** on the CN dub — the ENsub variant stays bilingual and
+   still needs the per-cue `zh.json` translation from step 3 of the classic
+   sequence).
+5. Close-out gates: `cn-pipeline dub verify-anchors` (every passage's speech
+   onset within ±500ms of its anchor, no bleed) AND `render verify`, then the
+   normal Frame.io review.
+
+Pilot rule (2026-07-21): run the next new video BOTH ways — cue-locked v1 and
+native v2 stacked on one Frame.io share — and let the native reviewer A/B them.

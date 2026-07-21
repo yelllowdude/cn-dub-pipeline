@@ -124,6 +124,71 @@ def build_mono_srt(segments: list[dict], zh_lines: list[str], en_out: Path, zh_o
     Path(zh_out).write_text("\n".join(zh_out_lines), encoding="utf-8")
 
 
+# Native dub mode: cues are derived FROM the finished Chinese dub, so they
+# split at natural Chinese sentence boundaries -- not inherited from the
+# English cue grid (that inheritance is the "translationese rhythm" root
+# cause native mode exists to fix; see dub_native.py).
+# One subtitle line of CJK. The frame fits ~24 chars at the current CN-dub
+# font size (6.75% of height, 16:9, 60px side margins) -- 20 keeps a margin.
+# Reviewer round 2026-07-21: long lines are hard to follow and one ran off
+# screen, so the cap is HARD -- no cue may exceed it, ever.
+ZH_MAX_CHARS = 20
+# ASCII ! and ? count as enders (mixed-width scripts happen); ASCII "." does
+# NOT -- it appears inside decimals (4.7星) and English product names.
+_ZH_SENTENCE_END = "。！？；!?"
+_ZH_MID_BREAK = ":：—…"    # colon/dash/ellipsis: clause turns worth their own cue
+_ZH_SOFT_BREAK = ",，、"
+_MIN_FRAGMENT = 4
+
+
+def _split_at(text: str, marks: str) -> list[str]:
+    parts, buf = [], ""
+    for ch in text:
+        buf += ch
+        if ch in marks:
+            parts.append(buf)
+            buf = ""
+    if buf:
+        parts.append(buf)
+    return parts
+
+
+def split_zh_cues(text: str) -> list[str]:
+    """Split one spoken-Chinese passage into subtitle cue lines, HARD-capped
+    at ZH_MAX_CHARS. Break priority: sentence enders > colon/dash > comma >
+    forced break at the cap (a comma-less stretch must still break). Tiny
+    trailing fragments merge into the previous cue when the cap allows."""
+    cues = []
+    for sentence in _split_at(text.strip(), _ZH_SENTENCE_END):
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        pieces = [sentence]
+        for marks in (_ZH_MID_BREAK, _ZH_SOFT_BREAK):
+            if all(len(p) <= ZH_MAX_CHARS for p in pieces):
+                break
+            pieces = [q for p in pieces
+                      for q in ([p] if len(p) <= ZH_MAX_CHARS else _split_at(p, marks))]
+        # forced break: whatever still exceeds the cap gets chopped at the cap
+        forced = []
+        for p in pieces:
+            while len(p) > ZH_MAX_CHARS:
+                forced.append(p[:ZH_MAX_CHARS])
+                p = p[ZH_MAX_CHARS:]
+            if p:
+                forced.append(p)
+        # merge tiny fragments into their predecessor when the cap allows
+        for p in forced:
+            p = p.strip()
+            if not p:
+                continue
+            if cues and len(p) < _MIN_FRAGMENT and len(cues[-1]) + len(p) <= ZH_MAX_CHARS:
+                cues[-1] += p
+            else:
+                cues.append(p)
+    return cues
+
+
 def load_segments(path: Path) -> list[dict]:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
