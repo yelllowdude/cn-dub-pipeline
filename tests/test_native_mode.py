@@ -82,3 +82,20 @@ check("unterminated final sentence kept", split_zh_cues("没有句号的结尾")
 check("empty passage -> no cues", split_zh_cues("  ") == [])
 
 print(f"\nall {passed} checks passed")
+
+# --- build_cndub_ass with empty English lines (Chinese-only native subs) ---
+import tempfile, os
+from cn_pipeline.render import build_cndub_ass
+
+srt_body = "\n".join(
+    f"{i}\n00:00:{i:02d},000 --> 00:00:{i:02d},900\n第{i}句中文字幕。\n\n" for i in range(1, 6))
+with tempfile.TemporaryDirectory() as td:
+    srt_p = os.path.join(td, "in.srt"); ass_p = os.path.join(td, "out.ass")
+    open(srt_p, "w", encoding="utf-8").write(srt_body)
+    from pathlib import Path
+    build_cndub_ass(Path(srt_p), Path(ass_p), 1920, 1080)
+    dialogues = [l for l in open(ass_p, encoding="utf-8") if l.startswith("Dialogue")]
+    check("empty-EN srt keeps every cue in the .ass", len(dialogues) == 5)
+    check("no stray {\\fs} for the missing EN line", all("\\fs" not in d.split(",,")[-1] or "\\N" not in d for d in dialogues))
+
+print(f"\nall {passed} checks passed (with ass)")

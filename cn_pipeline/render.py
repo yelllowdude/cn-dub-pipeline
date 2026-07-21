@@ -70,12 +70,18 @@ def build_cndub_ass(bilingual_srt: Path, ass_out: Path, video_w: int, video_h: i
     )
     events = []
     for block in [b for b in Path(bilingual_srt).read_text(encoding="utf-8").strip().split("\n\n") if b.strip()]:
+        # Locate the timing line instead of assuming it's ls[1]: a cue with an
+        # EMPTY English line (native mode ships Chinese-only subs) ends in
+        # "zh\n\n", which makes the block separator swallow the blank line and
+        # the NEXT block arrive with a leading "\n" -- positional indexing then
+        # mistakes the index row for the timing row and drops the cue.
         ls = block.split("\n")
-        if len(ls) < 2 or " --> " not in ls[1]:
+        ti = next((i for i, l in enumerate(ls) if " --> " in l), None)
+        if ti is None:
             continue
-        start, end = ls[1].split(" --> ")
-        zh = ls[2] if len(ls) > 2 else ""
-        en = ls[3] if len(ls) > 3 else ""
+        start, end = ls[ti].split(" --> ")
+        zh = ls[ti + 1] if len(ls) > ti + 1 else ""
+        en = ls[ti + 2] if len(ls) > ti + 2 else ""
         text = zh + (f"\\N{{\\fs{en_fs}}}{en}" if en else "")
         events.append(f"Dialogue: 0,{_srt_time_to_ass(start)},{_srt_time_to_ass(end)},ZH,,0,0,0,,{text}")
     Path(ass_out).write_text(header + "\n".join(events) + "\n", encoding="utf-8")
