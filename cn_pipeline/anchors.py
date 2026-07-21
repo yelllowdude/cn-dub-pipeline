@@ -69,6 +69,57 @@ def detect_speech_gaps(segments: list[dict]) -> list[dict]:
     return gaps
 
 
+def propose_anchors(video_ms: int, scene_cuts_ms: list[int], segments: list[dict]) -> dict:
+    """Automatic first-pass anchor pick (owner decision 2026-07-21: anchors
+    happen automatically most of the time; the OPERATOR -- Claude in-session --
+    reviews the proposal, the user is never asked to pick).
+
+    Heuristic: an anchor is a scene cut that lands inside an English speech
+    gap (nobody mid-sentence on either track) -- those are exactly the "cut
+    breathes, topic turns" moments worth syncing to. Enforce 30s minimum
+    spacing; if a stretch runs past ~75s with no qualifying cut, fall back to
+    the biggest speech gap in that stretch so windows never grow unbounded."""
+    from cn_pipeline.subtitles import parse_srt_time
+
+    gaps = detect_speech_gaps(segments)
+    gap_spans = [(g["at_ms"], g["at_ms"] + g["gap_ms"]) for g in gaps]
+
+    def in_gap(ms):
+        return any(a - 400 <= ms <= b + 400 for a, b in gap_spans)
+
+    MIN_SPACING_MS, MAX_SPACING_MS = 30_000, 75_000
+    picks = [0]
+    for cut in scene_cuts_ms:
+        if cut - picks[-1] < MIN_SPACING_MS or video_ms - cut < MIN_WINDOW_MS:
+            continue
+        if in_gap(cut):
+            picks.append(cut)
+    # fill oversized stretches with the biggest speech gap inside them
+    filled = [picks[0]]
+    for nxt in picks[1:] + [video_ms]:
+        while nxt - filled[-1] > MAX_SPACING_MS:
+            inside = [g for g in gaps
+                      if filled[-1] + MIN_SPACING_MS <= g["at_ms"] <= nxt - MIN_WINDOW_MS]
+            if not inside:
+                break
+            best = max(inside, key=lambda g: g["gap_ms"])
+            filled.append(best["at_ms"] + best["gap_ms"] // 2)
+        if nxt != video_ms:
+            filled.append(nxt)
+
+    # en_seg_range: segments whose start falls inside each window
+    seg_starts = [parse_srt_time(s["time"].split(" --> ")[0]) for s in segments]
+    anchors_out = []
+    for i, ms in enumerate(filled):
+        end = filled[i + 1] if i + 1 < len(filled) else video_ms
+        lo = next((j for j, st in enumerate(seg_starts) if st >= ms), len(segments))
+        hi_excl = next((j for j, st in enumerate(seg_starts) if st >= end), len(segments))
+        anchors_out.append({"id": f"a{i + 1:02d}", "ms": ms,
+                            "note": "auto-proposed (operator: review against the picture)",
+                            "en_seg_range": [lo, max(lo, hi_excl - 1)]})
+    return {"video_ms": video_ms, "proposed_by": "auto", "anchors": anchors_out}
+
+
 def load_anchors(path: Path) -> dict:
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     errors = validate_anchors(data)

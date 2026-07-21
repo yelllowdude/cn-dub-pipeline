@@ -252,15 +252,19 @@ pre-flight, transcribe, sponsor check, title, thumbnail, M&E, render, review,
 publish — is unchanged):
 
 1. `cn-pipeline anchors detect --project-id {id}` → `anchor_candidates.json`
-   (scene cuts + English speech gaps). **Watch the video and write
-   `runs/{id}/anchors.json` yourself** — ~1 anchor per 30–60s, ONLY at moments
-   that must sync (product shots, on-screen text, chapter turns). Anchor
-   selection is judgment; never auto-pick. Then `anchors validate`.
+   AND an auto-proposed `anchors.json` (scene cuts that land in English speech
+   gaps, 30–75s spacing). **Anchors are automatic most of the time — you (the
+   operator) review the proposal against the picture and adjust only where a
+   must-sync moment is missing or misplaced (product shots, on-screen text,
+   chapter turns). Never ask the user to pick anchors.** Then `anchors validate`.
 2. **Write the native script — live.** One natural spoken-Chinese paragraph
    per anchor window in `zh_script.json` (`{"passages": [{"anchor_id",
-   "text"}]}`). The English transcript and the visuals are REFERENCE, not a
-   structure to copy: write it like it was never English. Glossary still law;
-   product names stay English. Aim for ~90% of each window at natural pace.
+   "text"}]}`). Ground each passage in the English VO for that window
+   (`en_seg_range`): carry over the essential meaning, facts, numbers, jokes
+   and beats — but never translate word-by-word or clause-by-clause. Extract
+   the essence, then write the Chinese as if the video had never had an
+   English voiceover. Glossary still law; product names stay English. Aim for
+   ~90% of each window at natural pace.
    Then: `cn-pipeline subtitles ingest-script --project-id {id} --script-json …`
 3. `cn-pipeline dub generate --project-id {id}` — TTS per passage, natural
    pace. Overflowing passages are flagged with a target char count: **tighten

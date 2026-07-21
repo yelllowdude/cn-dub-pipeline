@@ -400,11 +400,17 @@ def cmd_anchors_detect(args):
     out_path.write_text(json.dumps(
         {"video_ms": video_ms, "scene_cuts_ms": cuts, "speech_gaps": gaps},
         ensure_ascii=False, indent=2), encoding="utf-8")
-    lo, hi = anchors.ANCHOR_DENSITY_HINT_S
     print(f"wrote {out_path}: {len(cuts)} scene cuts, {len(gaps)} speech gaps.")
-    print(f"Now write {scratch / 'anchors.json'} by hand -- aim for one anchor per "
-          f"{lo}-{hi}s at moments that MUST sync (product shots, on-screen text, "
-          f"chapter turns), then run `anchors validate`.")
+    anchors_path = scratch / "anchors.json"
+    if not anchors_path.exists():
+        proposal = anchors.propose_anchors(video_ms, cuts, segs)
+        anchors_path.write_text(json.dumps(proposal, ensure_ascii=False, indent=2),
+                                encoding="utf-8")
+        print(f"auto-proposed {len(proposal['anchors'])} anchors -> {anchors_path}")
+        print("Operator: review the proposal against the picture (must-sync moments: "
+              "product shots, on-screen text, chapter turns), adjust, then `anchors validate`.")
+    else:
+        print(f"{anchors_path} already exists -- left untouched")
 
 
 def cmd_anchors_validate(args):
