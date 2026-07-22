@@ -35,9 +35,11 @@ def resolve_project_dir(project_id: str) -> Path:
             f"Ambiguous project id '{project_id}' -- multiple folders matched under {base}: "
             + ", ".join(m.name for m in matches)
         )
+    hint = ("Run `cn-pipeline drive pull --project-id ...` to fetch it from Drive first."
+            if cfg.storage == "gdrive"
+            else "Check the project ID matches the Notion page exactly.")
     raise ProjectNotFoundError(
-        f"No project folder found for '{project_id}' under {base}. "
-        "Check the project ID matches the Notion page exactly."
+        f"No project folder found for '{project_id}' under {base}. {hint}"
     )
 
 

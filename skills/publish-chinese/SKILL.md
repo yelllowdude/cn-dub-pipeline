@@ -46,7 +46,11 @@ human runs this skill (that's deliberate: no status-change side effects).
      skip unless the user explicitly says to publish anyway.
    - Confirm the deliverable exists in Drive `/CN/`:
      `{id}_cndub.mp4`, or the highest `_v{N}` revision if review produced
-     re-cuts — **always publish the highest version present.**
+     re-cuts — **always publish the highest version present.** On a machine
+     in gdrive storage mode, run `cn-pipeline drive pull --project-id {id}
+     --no-claim` first so the local mirror has the latest cut and
+     `{id}_cover.jpg` (publishing doesn't modify the project, so no claim
+     is needed).
 
 3. **Gather metadata — from the Notion row only, never invented:**
    - Title: the row page's `# CN title → V2 · 中配` line, exactly as written
@@ -56,7 +60,11 @@ human runs this skill (that's deliberate: no status-change side effects).
    If any of the three is missing from the page, stop for that row and report
    it — a publish with fabricated metadata is worse than a skipped one.
 
-4. **Upload** (mechanical, one call per row):
+4. **Upload** (mechanical, one call per row). **Immediately before this call,
+   re-read the row's `CNdub YouTube` property one more time** — not the value
+   you fetched in step 2. Metadata-gathering can take minutes, and a teammate
+   publishing in parallel lands exactly in that gap; a duplicate draft cannot
+   be deleted by the pipeline (upload-only scope), so the last look wins:
    ```
    cn-pipeline publish youtube --project-id {id} [--version vN] \
        --title '{V2 title}' --description-file {tmp} --tags '{tags}'
@@ -66,7 +74,10 @@ human runs this skill (that's deliberate: no status-change side effects).
    (`{id}_cover.jpg` from `/CN/`) is set automatically; if the `thumbnail`
    field reports a failure, flag it — the human sets it in Studio.
 
-5. **Write back to the Notion row:**
+5. **Write back to the Notion row — the `CNdub YouTube` link FIRST, before
+   any other write or the next row's upload.** That property is the
+   double-publish guard for everyone else; every second it stays empty after
+   a successful upload is a second another operator can duplicate the draft.
    - `CNdub YouTube` ← the returned link
    - `Publish requested` ← unchecked
    - In the page's publish-status reminder block (the callout at the top —

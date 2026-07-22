@@ -8,6 +8,17 @@ the judgment calls.
 **If you just want to use it, read the first half of this page and stop.**
 The machine internals live in the second half and in `docs/`.
 
+### Which setup do you need?
+
+| Role | What you do | What you install |
+|---|---|---|
+| **Reviewer** | Watch cuts on Frame.io, leave comments, say "good to publish" | **Nothing.** A browser and the Frame.io link (+ Notion access) is the whole toolchain. |
+| **Operator** | Run localizations and publishes by talking to Claude | Part 2 below — one pasted prompt, ~15 minutes. |
+| **Developer** | Change the pipeline's code | Part 3's dev-clone section + `CLAUDE.md`. |
+
+Most of the team are reviewers. If nobody asked you to run the pipeline
+yourself, you can stop reading after Part 1.
+
 ---
 
 ## Part 1 · The human guide
@@ -70,8 +81,8 @@ You talk to Claude in plain language. There are only three phrases to know:
   actual publish button in YouTube Studio.
 - **Bilibili uploads** are still manual (waiting on API access) — see
   `docs/cn_staff_handoff.html` for that checklist.
-- **Hold the keys.** The two paid API keys come from Wayne via password
-  manager — never Slack or email.
+- **Hold the keys.** All shared credentials live in the team password vault
+  (see "Credentials" below) — never Slack or email.
 
 That's the whole job. Everything else — timing, syncing the voice to the
 picture, subtitle sizing, not double-publishing, not overspending on the paid
@@ -79,42 +90,54 @@ voice API — is enforced by the machinery, not by you remembering things.
 
 ---
 
-## Part 2 · Setup (once per machine)
+## Part 2 · Setup (once per machine — operators only)
 
 You don't follow a checklist — you hand the job to Claude. In the Claude
 desktop app (signed into the Gravgear team), start a chat and paste this:
 
-> Set up cn-dub-pipeline on my Mac from https://github.com/yelllowdude/cn-dub-pipeline —
+> Set up cn-dub-pipeline on my machine from https://github.com/yelllowdude/cn-dub-pipeline —
 > follow the setup steps in its README: install the tools it needs, register
-> and enable the plugin, run `cn-pipeline-setup`, fill in my Google Drive
-> path, then run the validation dry-run. Stop and ask me whenever there's
-> something only I can do.
+> and enable the plugin, run `cn-pipeline-setup`, then walk me through
+> `cn-pipeline drive auth` and the validation dry-run. Stop and ask me
+> whenever there's something only I can do.
 
 Approve the commands as they scroll by. Claude does all the mechanical work
 and pauses at the **only three things it can't do for you**:
 
-1. **Paste the API keys** — ElevenLabs + KIE, from Wayne via password manager.
+1. **Paste the API keys** — ElevenLabs + KIE, from the team password vault.
    You type them yourself; Claude never handles your secrets.
-2. **Sign into Google Drive for desktop** (with the `General` shared drive) —
-   a one-time login.
+2. **One browser sign-in for Google Drive** — `cn-pipeline drive auth` prints
+   a URL; you consent with your own @thegravgear.com account (it needs edit
+   access to the `General` Shared Drive). No Google Drive for Desktop
+   install, no syncing — the pipeline talks to Drive directly and fetches
+   only the project it's working on.
 3. **Restart the app once** — a freshly-registered plugin only loads on
    restart, and Claude can't restart the app it's running in.
 
 That's the whole thing: one prompt, plus those three. When it's done, ask
 "what skills are available?" — `localize-chinese` means you're ready.
 
+> **On a Claude Team plan:** an org admin can push the plugin to everyone
+> automatically (claude.ai → Admin Settings → Claude Code → managed
+> settings: `extraKnownMarketplaces` + `enabledPlugins`). If that's done,
+> the register/enable step below is already handled — the pasted prompt
+> skips it on its own.
+
 <details>
 <summary><b>The exact steps</b> — what Claude follows, and how to do it by hand</summary>
 
-Prerequisites: macOS; the Claude desktop app (or Claude Code CLI) signed into
-the Gravgear team; Google Drive for desktop signed in.
+Prerequisites: macOS or Linux; the Claude desktop app (or Claude Code CLI)
+signed into the Gravgear team.
 
-1. **Install the tools:** `brew install ffmpeg-full python@3.14` (install
-   Homebrew first if needed: https://brew.sh). It must be `ffmpeg-full`, not
-   plain `ffmpeg` — only that formula has libass (subtitle burn-in) and the
-   videotoolbox hardware encoder.
+1. **Install the tools** — macOS: `brew install ffmpeg-full python@3.14`
+   (install Homebrew first if needed: https://brew.sh). It must be
+   `ffmpeg-full`, not plain `ffmpeg` — only that formula has libass
+   (subtitle burn-in). Linux: the distro `ffmpeg` usually has libass
+   already; the pipeline verifies at startup and refuses an ffmpeg that
+   can't burn subtitles.
 2. **Register + enable the plugin** by merging into `~/.claude/settings.json`
-   (don't overwrite other settings):
+   (don't overwrite other settings; skip if your Team admin pushes this via
+   managed settings):
    - `extraKnownMarketplaces`: `{"gravgear-tools": {"source": {"source": "github", "repo": "yelllowdude/cn-dub-pipeline"}}}`
    - `enabledPlugins`: `{"cn-dub-pipeline@gravgear-tools": true}`
 
@@ -124,18 +147,41 @@ the Gravgear team; Google Drive for desktop signed in.
 4. **Run `cn-pipeline-setup`** — creates the Python venv plus starter `.env`
    and `config.json` under `~/.claude/plugins/data/…` (outside the synced
    plugin files, so a plugin update never wipes them). It prints the exact
-   path.
-5. **Fill in the two files:** the API keys in `.env` *(human — secrets)*;
-   `drive_root` in `config.json` = `/Users/<your-mac-username>/Library/CloudStorage/GoogleDrive-wayne@thegravgear.com/Shared drives/General`
-   (differs from anyone else's only by the username — Claude can fill this in).
-6. **Confirm:** ask "what skills are available?" — `localize-chinese` should
+   path. The starter `config.json` is preset to gdrive storage mode; there
+   is no per-person path to edit.
+5. **Fill in `.env`** *(human — secrets)*: the shared keys from the team
+   vault (see "Credentials" below).
+6. **Authorize Drive:** `cn-pipeline drive auth` → open the printed URL,
+   consent as your own team account, paste the redirect URL back. *(human —
+   sign-in)*
+7. **Confirm:** ask "what skills are available?" — `localize-chinese` should
    be listed.
-7. **Validate before the first real run:** dry-run against a project that's
+8. **Validate before the first real run:** dry-run against a project that's
    already been localized (ask Wayne for the known-good baseline) and check
    the output durations match the published files in its Drive `/CN/` folder.
    `docs/VALIDATE.md` is the copy-paste runbook.
 
 </details>
+
+### Credentials
+
+Everything secret lives in the **team password vault** (ask Wayne for access)
+and goes into the `.env` that `cn-pipeline-setup` creates — never into the
+repo, Slack, or email:
+
+| `.env` entry | What it is | Vault item |
+|---|---|---|
+| `ELEVENLABS_API_KEY` | paid TTS voice | shared team key |
+| `KIE_API_KEY` | paid thumbnail cleanup | shared team key |
+| `GDRIVE_CLIENT_ID/SECRET` | Google Desktop OAuth client (may reuse the YouTube one) | shared team credential |
+| `FRAMEIO_CLIENT_ID/SECRET` (+ share passphrase) | Frame.io review integration | shared team credential |
+| `YOUTUBE_CLIENT_ID/SECRET` | YouTube upload client | shared team credential |
+
+The three `*_REFRESH_TOKEN` entries are minted per machine by the one-time
+auth commands (`drive auth`, `review auth`, `publish auth`) — those aren't in
+the vault. Sign-in accounts differ on purpose: **Drive** = your own team
+account; **YouTube** = the Chinese channel account (`publish auth` tells
+you); **Frame.io** = the team's Adobe-linked reviewer account.
 
 ---
 
@@ -187,6 +233,22 @@ The older cue-locked mode still exists per-project
 (`runs/{id}/project.json`); existing projects are untouched by the native
 default.
 
+### Storage: how the pipeline reaches the Shared Drive
+
+Default is **gdrive mode**: the CLI talks to the Google Drive REST API and
+works against a local mirror of just the project it's on. `drive pull`
+fetches the master + `/CN/` + the project's shared scratch state (paid TTS
+cache, review state, spend counter — kept at `CN/_pipeline/scratch/` on
+Drive so any operator can resume any project); `drive push` uploads what
+changed (md5-diffed). The old **mount mode** (Google Drive for Desktop +
+`drive_root` in config.json) still works for machines that already have it.
+
+**One project, one operator at a time:** `drive pull` claims the project
+(`CN/_pipeline/claim.json`). A second operator's pull refuses with who/when,
+because two concurrent runs double the paid TTS spend and fork the Frame.io
+review link. Hand a project off with `drive push --release`; take over a
+genuinely abandoned claim with `--steal` after checking with its holder.
+
 ### Guard rails
 
 - **Re-running is safe.** Every stage prints `SKIP_OK` when its outputs are
@@ -226,7 +288,7 @@ git clone https://github.com/yelllowdude/cn-dub-pipeline
 cd cn-dub-pipeline
 python3.14 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp config.example.json config.json   # edit drive_root
+cp config.example.json config.json   # gdrive mode preset; set drive_root + "storage": "mount" if you have the Drive mount
 cp .env.example .env                 # edit API keys
 ```
 

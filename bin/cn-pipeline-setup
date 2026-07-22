@@ -15,22 +15,37 @@ if [ -x "$VENV/bin/python" ]; then
   echo "venv already exists at $VENV -- reinstalling requirements."
   "$VENV/bin/pip" install -q -r "$ROOT/requirements.txt"
 else
-  echo "Creating venv at $VENV ..."
-  python3.14 -m venv "$VENV"
+  # Prefer 3.14 (the version the team pins and tests against), but any
+  # reasonably current python3 works -- don't make a teammate's setup fail
+  # over a minor-version mismatch.
+  PY=""
+  for v in 3.14 3.13 3.12; do
+    if command -v "python$v" >/dev/null 2>&1; then PY="python$v"; break; fi
+  done
+  if [ -z "$PY" ]; then
+    echo "No python3.12+ found. Install one first (macOS: brew install python@3.14)." >&2
+    exit 1
+  fi
+  if [ "$PY" != "python3.14" ]; then
+    echo "NOTE: python3.14 not found; using $PY. The team pins 3.14 -- if pip install"
+    echo "fails on a dependency below, install python@3.14 and rerun."
+  fi
+  echo "Creating venv at $VENV (using $PY) ..."
+  "$PY" -m venv "$VENV"
   "$VENV/bin/pip" install -q -r "$ROOT/requirements.txt"
 fi
 echo "Python environment ready."
 
 if [ ! -f "$DATA/.env" ]; then
   cp "$ROOT/.env.example" "$DATA/.env"
-  echo "Created $DATA/.env -- fill in ELEVENLABS_API_KEY and KIE_API_KEY (get these from Wayne via a secure channel)."
+  echo "Created $DATA/.env -- fill in ELEVENLABS_API_KEY and KIE_API_KEY (shared team keys, in the team password vault -- see README 'Credentials')."
 else
   echo "$DATA/.env already exists, left as-is."
 fi
 
 if [ ! -f "$DATA/config.json" ]; then
   cp "$ROOT/config.example.json" "$DATA/config.json"
-  echo "Created $DATA/config.json -- set drive_root to your Google Drive path (see README)."
+  echo "Created $DATA/config.json -- gdrive storage mode is preset; run 'cn-pipeline drive auth' once (see README)."
 else
   echo "$DATA/config.json already exists, left as-is."
 fi

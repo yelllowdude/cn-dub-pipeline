@@ -8,6 +8,8 @@ subtitles, which is a worse failure than refusing to start.
 
 import json
 import os
+import shutil
+import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -27,12 +29,23 @@ class ConfigError(RuntimeError):
     pass
 
 
+def _has_libass(ffmpeg_path: str) -> bool:
+    """True if this ffmpeg build can burn subtitles (libass compiled in)."""
+    try:
+        out = subprocess.run([ffmpeg_path, "-version"], capture_output=True,
+                             text=True, timeout=10)
+        return "--enable-libass" in out.stdout
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+
+
 def _load_env():
     if not ENV_PATH.exists():
         raise ConfigError(
             f"No .env file at {ENV_PATH}. Run cn-pipeline-setup (or copy .env.example "
             "to .env yourself) and fill in ELEVENLABS_API_KEY and KIE_API_KEY "
-            "(get these from Wayne via a secure channel)."
+            "(the shared team keys live in the team password vault -- see README, "
+            "'Credentials')."
         )
     for line in ENV_PATH.read_text().splitlines():
         line = line.strip()
@@ -126,16 +139,58 @@ class Config:
             "openid,AdobeID,email,profile,offline_access,additional_info.roles",
         )
 
-        drive_root = raw.get("drive_root")
-        if not drive_root:
-            raise ConfigError("config.json is missing 'drive_root'")
-        self.drive_root = Path(drive_root).expanduser()
-        if not self.drive_root.is_dir():
-            raise ConfigError(
-                f"drive_root '{self.drive_root}' doesn't exist or isn't a directory. "
-                "Confirm Google Drive Desktop is installed and the Shared Drive has synced "
-                "(see README step on Drive setup)."
-            )
+        # Two storage modes for the video files on the Shared Drive:
+        #   "gdrive" (team default): the CLI talks to the Drive REST API and works
+        #       against a local mirror (see cn_pipeline.gdrive). Needs no Google
+        #       Drive for Desktop install and no per-person mount path.
+        #   "mount": the original Drive-for-Desktop path; drive_root points at the
+        #       synced Shared Drive. Kept as a fallback for machines that already
+        #       have the mount -- behavior is exactly as before this mode existed.
+        # Absent "storage" key: infer from which config keys are filled, so every
+        # pre-existing config.json (drive_root only) keeps working unchanged.
+        self.gdrive_drive_id = raw.get("gdrive_drive_id", "") or ""
+        self.gdrive_drive_name = raw.get("gdrive_drive_name", "") or ""
+        self.storage = raw.get("storage") or (
+            "gdrive" if (self.gdrive_drive_id or self.gdrive_drive_name) else "mount")
+        if self.storage not in ("gdrive", "mount"):
+            raise ConfigError(f"config.json 'storage' must be \"gdrive\" or \"mount\", "
+                              f"got {self.storage!r}")
+
+        # Drive API credentials (gdrive mode). The GDRIVE_ vars fall back to the
+        # YouTube Desktop client from the same Google Cloud project -- one client
+        # serves both APIs; only the consenting account differs (Drive: any team
+        # member of the Shared Drive; YouTube: the channel account).
+        self.gdrive_client_id = (os.environ.get("GDRIVE_CLIENT_ID", "")
+                                 or os.environ.get("YOUTUBE_CLIENT_ID", ""))
+        self.gdrive_client_secret = (os.environ.get("GDRIVE_CLIENT_SECRET", "")
+                                     or os.environ.get("YOUTUBE_CLIENT_SECRET", ""))
+        self.gdrive_refresh_token = os.environ.get("GDRIVE_REFRESH_TOKEN", "")
+        # Optional operator label for the project claim file; defaults to the
+        # OS username (see gdrive.whoami).
+        self.operator = raw.get("operator", "") or ""
+
+        if self.storage == "gdrive":
+            if not (self.gdrive_drive_id or self.gdrive_drive_name):
+                raise ConfigError(
+                    "storage is \"gdrive\" but config.json has neither 'gdrive_drive_name' "
+                    "nor 'gdrive_drive_id' (the Shared Drive holding _videos/, e.g. \"General\").")
+            mirror = raw.get("mirror_dir") or str(DATA_ROOT / "mirror")
+            # the mirror reproduces the Drive layout, so every path helper in
+            # cn_pipeline.paths works on it unchanged
+            self.drive_root = Path(mirror).expanduser()
+            self.drive_root.mkdir(parents=True, exist_ok=True)
+        else:
+            drive_root = raw.get("drive_root")
+            if not drive_root:
+                raise ConfigError("config.json is missing 'drive_root' (mount mode) -- "
+                                  "or set storage to \"gdrive\" (see README, 'Storage modes')")
+            self.drive_root = Path(drive_root).expanduser()
+            if not self.drive_root.is_dir():
+                raise ConfigError(
+                    f"drive_root '{self.drive_root}' doesn't exist or isn't a directory. "
+                    "Confirm Google Drive Desktop is installed and the Shared Drive has synced "
+                    "(see README step on Drive setup)."
+                )
 
         self.whisper_model = raw.get("whisper_model", "small")
         self.ffmpeg_path = self._resolve_ffmpeg(raw.get("ffmpeg_path"))
@@ -165,21 +220,56 @@ class Config:
         self.screentext_enabled = bool(raw.get("screentext_enabled", False))
 
     def _resolve_ffmpeg(self, override: str | None) -> str:
+        """Find a libass-capable ffmpeg. Probes, in order: the config override,
+        Homebrew's ffmpeg-full (via brew --prefix, so Intel /usr/local and Apple
+        Silicon /opt/homebrew both work), the two known brew paths directly, and
+        finally whatever's on PATH. Each candidate must prove libass in its build
+        config -- a render through an ffmpeg without libass produces a video with
+        NO burned-in subtitles rather than an error, which is why this refuses to
+        fall back silently."""
         if override:
             p = Path(override)
             if not p.exists():
                 raise ConfigError(f"config.json's ffmpeg_path override '{override}' doesn't exist")
+            if not _has_libass(str(p)):
+                raise ConfigError(
+                    f"ffmpeg_path override '{override}' has no libass support "
+                    "(--enable-libass missing from its build config), so subtitle "
+                    "burn-in would silently produce sub-less videos. Point it at "
+                    "an ffmpeg built with libass (brew's 'ffmpeg-full')."
+                )
             return str(p)
 
-        default = Path(FFMPEG_FULL_DEFAULT)
-        if default.exists():
-            return str(default)
+        candidates = []
+        brew = shutil.which("brew")
+        if brew:
+            try:
+                prefix = subprocess.run([brew, "--prefix", "ffmpeg-full"], capture_output=True,
+                                        text=True, timeout=10).stdout.strip()
+                if prefix:
+                    candidates.append(f"{prefix}/bin/ffmpeg")
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+        candidates += [FFMPEG_FULL_DEFAULT, "/usr/local/opt/ffmpeg-full/bin/ffmpeg"]
+        path_ffmpeg = shutil.which("ffmpeg")
+        if path_ffmpeg:
+            candidates.append(path_ffmpeg)
+
+        checked = []
+        for c in candidates:
+            if c in checked or not Path(c).exists():
+                continue
+            checked.append(c)
+            if _has_libass(c):
+                return c
 
         raise ConfigError(
-            f"ffmpeg-full not found at {FFMPEG_FULL_DEFAULT}. This pipeline needs the "
-            "'ffmpeg-full' Homebrew formula specifically (plain 'ffmpeg' lacks libass, "
-            "so subtitle burn-in silently fails). Run: brew install ffmpeg-full\n"
-            "If it's installed somewhere else, set \"ffmpeg_path\" in config.json."
+            "No libass-capable ffmpeg found (checked: "
+            + (", ".join(checked) or "nothing on PATH or in the known Homebrew locations")
+            + "). This pipeline needs an ffmpeg built with libass -- plain 'ffmpeg' "
+            "lacks it, so subtitle burn-in silently fails. On macOS run: "
+            "brew install ffmpeg-full ; on Linux the distro ffmpeg usually has libass "
+            "already. If it's installed somewhere unusual, set \"ffmpeg_path\" in config.json."
         )
 
 
