@@ -7,3 +7,4 @@ requests==2.34.2
 tqdm==4.68.4
 audioop-lts==0.2.2
 easyocr==1.7.2
+demucs==4.1.0

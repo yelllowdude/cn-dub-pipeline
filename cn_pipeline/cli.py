@@ -18,7 +18,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from cn_pipeline import align, anchors, dub, dub_native, frameio, paths, publish, render, screentext, subtitles, thumbnail
+from cn_pipeline import align, anchors, dub, dub_native, frameio, gdrive, paths, publish, render, screentext, subtitles, thumbnail
 from cn_pipeline.config import ConfigError, get_config
 
 
@@ -667,6 +667,101 @@ def cmd_screentext_localize(args):
         print("\nNo localized master written -- renders will use the raw master unchanged.")
 
 
+def _require_gdrive_mode():
+    cfg = get_config()
+    if cfg.storage != "gdrive":
+        sys.exit(
+            "drive commands only apply when config.json's storage is \"gdrive\". "
+            "This machine is in mount mode -- the Shared Drive is already synced "
+            "locally at drive_root, nothing to pull or push."
+        )
+    return cfg
+
+
+def cmd_drive_auth(args):
+    """One-time Drive API sign-in. Consent as any team account that can edit
+    the Shared Drive (this is NOT the YouTube channel sign-in)."""
+    cfg = get_config()
+    if not args.redirect_url:
+        url = gdrive.build_authorize_url(cfg)
+        print("1) Open this URL and sign in as an account with EDIT access to the "
+              "team Shared Drive:\n")
+        print(f"   {url}\n")
+        print("2) After consent, the browser lands on a http://localhost/?code=... page")
+        print("   that won't load -- copy the FULL URL from the address bar.")
+        print("3) Re-run:  cn-pipeline drive auth --redirect-url '<paste it>'")
+        return
+    tok = gdrive.exchange_code_for_tokens(cfg, args.redirect_url)
+    path = gdrive.save_refresh_token(tok["refresh_token"])
+    print(f"Saved GDRIVE_REFRESH_TOKEN to {path}. Drive storage is ready.")
+
+
+def cmd_drive_pull(args):
+    """Fetch a project from the Shared Drive into the local mirror (master,
+    me.wav, all /CN/ deliverables) and restore its shared scratch state into
+    runs/{id}/. Claims the project so a second operator gets a loud error
+    instead of a silent race."""
+    _require_gdrive_mode()
+    scratch = _scratch(args.project_id)
+    try:
+        result = gdrive.pull(args.project_id, scratch, steal=args.steal,
+                             force=args.force, claim=not args.no_claim)
+    except gdrive.ClaimError as e:
+        sys.exit(f"claim refused: {e}")
+    n = len(result["downloaded"])
+    print(f"project mirrored at {result['project_dir']}")
+    print(f"master: {result['master'] or 'NOT FOUND on Drive (check the project folder)'}")
+    print(f"downloaded {n} file(s)" + (":" if n else " (everything already current)"))
+    for name in result["downloaded"]:
+        print(f"  {name}")
+    if result["claim"] == "stolen":
+        print("NOTE: claim taken over with --steal -- make sure the previous operator "
+              "has actually stopped, or you'll both pay for the same TTS.")
+    elif result["claim"] != "skipped":
+        print(f"claim: {result['claim']} (release with `drive push --release` or `drive release`)")
+
+
+def cmd_drive_push(args):
+    """Upload changed /CN/ deliverables + shared scratch state back to the
+    Shared Drive. Uploads are md5-diffed: unchanged files don't transfer."""
+    _require_gdrive_mode()
+    scratch = _scratch(args.project_id)
+    result = gdrive.push(args.project_id, scratch, release=args.release)
+    n = len(result["uploaded"])
+    print(f"uploaded {n} file(s)" + (":" if n else " (Drive already current)"))
+    for name in result["uploaded"]:
+        print(f"  {name}")
+    if result["released"]:
+        print("claim released.")
+    else:
+        print("claim kept -- release with `drive release` when you hand the project off.")
+
+
+def cmd_drive_claim(args):
+    _require_gdrive_mode()
+    try:
+        verdict = gdrive.claim_project(args.project_id, steal=args.steal)
+    except gdrive.ClaimError as e:
+        sys.exit(f"claim refused: {e}")
+    print(f"claim: {verdict}")
+
+
+def cmd_drive_release(args):
+    _require_gdrive_mode()
+    gdrive.release_project(args.project_id)
+    print("claim released.")
+
+
+def cmd_drive_status(args):
+    _require_gdrive_mode()
+    claim = gdrive.claim_status(args.project_id)
+    if not claim or not claim.get("claimed"):
+        print("unclaimed")
+    else:
+        print(f"claimed by {claim.get('operator')}@{claim.get('host')} "
+              f"since {claim.get('claimed_at')}")
+
+
 def cmd_review_auth(args):
     """One-time Frame.io V4 sign-in (User Authentication). Without --redirect-url,
     prints the IMS authorize URL to open; with it, exchanges the returned code for
@@ -891,6 +986,24 @@ def main():
     add(render_group, "ensub", cmd_render_ensub)
     add(render_group, "cndub", cmd_render_cndub)
     add(render_group, "verify", cmd_render_verify)
+
+    drive_group = sub.add_parser("drive").add_subparsers(dest="cmd", required=True)
+    drive_auth = drive_group.add_parser("auth")
+    drive_auth.add_argument("--redirect-url", dest="redirect_url", default=None)
+    drive_auth.set_defaults(func=cmd_drive_auth)
+    drive_pull = add(drive_group, "pull", cmd_drive_pull)
+    drive_pull.add_argument("--steal", action="store_true",
+                            help="take over another operator's claim (coordinate first -- "
+                                 "two concurrent operators double the paid TTS spend)")
+    drive_pull.add_argument("--no-claim", action="store_true", dest="no_claim",
+                            help="pull without claiming (read-only look at a project)")
+    drive_push = add(drive_group, "push", cmd_drive_push)
+    drive_push.add_argument("--release", action="store_true",
+                            help="release the project claim after pushing (hand-off done)")
+    drive_claim = add(drive_group, "claim", cmd_drive_claim)
+    drive_claim.add_argument("--steal", action="store_true")
+    add(drive_group, "release", cmd_drive_release)
+    add(drive_group, "status", cmd_drive_status)
 
     review_group = sub.add_parser("review").add_subparsers(dest="cmd", required=True)
     # `auth` is global setup (no project-id), so it's registered directly.

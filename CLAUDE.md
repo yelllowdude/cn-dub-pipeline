@@ -17,6 +17,38 @@ Keep new work on the right side of that line. When a reviewer's feedback needs
 both (e.g. a term fix that triggers a re-dub), the skill edits the translation
 and then drives the CLI.
 
+## Storage modes (Drive API vs mount)
+
+Two ways the pipeline reaches the Shared Drive, set by `storage` in
+config.json (`cn_pipeline/gdrive.py` has the full design doc):
+
+- **`gdrive` (team default):** the CLI talks to the Drive REST API and works
+  against a LOCAL MIRROR that reproduces the Drive layout, so paths.py and
+  every mtime-based stage gate keep local-file semantics. Bytes move only via
+  `drive pull` / `drive push` (md5-diffed both ways). No Drive for Desktop,
+  no per-person mount path.
+- **`mount`:** the original Drive-for-Desktop path (`drive_root`). Unchanged
+  behavior, kept for machines that already have the mount.
+
+Rules that must not regress:
+- **`drive pull` claims the project** (`CN/_pipeline/claim.json`, advisory);
+  a claimed project refuses a second operator without `--steal`. This is the
+  only guard against two machines double-paying TTS and forking the Frame.io
+  version stack — never bypass it, never steal silently.
+- **Shared scratch state lives at `CN/_pipeline/scratch/` on Drive** and
+  syncs with `runs/{id}/` on pull/push. The paid TTS `chunks/` cache,
+  `frameio_review.json`, and `api_spend.json` are in the sync set
+  (losing frameio_review.json forks a NEW share link -- the exact failure
+  the sync exists to prevent); huge regenerable intermediates
+  (`audio_16k.wav`, `dub_master_*.wav`, align dirs) deliberately are not —
+  see `gdrive.SCRATCH_EXCLUDE_*` before adding scratch files.
+- Masters are pull-only: push never uploads `{id}*.mp4` from the project
+  root, only `/CN/**` and `{id}_me.wav`.
+- Drive auth reuses the YouTube Desktop OAuth client (GDRIVE_ vars fall back
+  to YOUTUBE_ ones); the CONSENT accounts differ — Drive: any team member
+  with edit access; YouTube: the channel account. Don't "fix" one into the
+  other.
+
 ## Conventions that must not regress
 
 - **Versioned deliverables:** `deliverable_paths(project_dir, version)` — a
@@ -95,7 +127,10 @@ upstream and were probed against the live account.
   NOT the repo checkout — survives plugin updates. `bin/cn-pipeline` resolves
   this; outside a plugin session export `CLAUDE_PLUGIN_ROOT`/`CLAUDE_PLUGIN_DATA`
   explicitly.
-- Python 3.14 venv (`cn-pipeline-setup`); ffmpeg-full (libass + videotoolbox).
+- Python 3.14 venv (`cn-pipeline-setup`; falls back to 3.13/3.12 with a
+  warning). ffmpeg is probed at startup (brew ffmpeg-full on either
+  architecture, then PATH) and must prove `--enable-libass` in its build
+  config -- an ffmpeg without libass burns NO subtitles rather than erroring.
 - Tests run standalone: `python tests/test_x.py` (no pytest dependency);
   `tests/_bootstrap.py` stubs heavy deps only when absent. Keep new tests pure
   (no HTTP, no media) and runnable the same way.

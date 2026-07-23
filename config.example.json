@@ -1,5 +1,10 @@
 {
-  "drive_root": "/Users/YOUR_MAC_USERNAME/Library/CloudStorage/GoogleDrive-wayne@thegravgear.com/Shared drives/General",
+  "storage": "gdrive",
+  "gdrive_drive_name": "General",
+  "gdrive_drive_id": "",
+  "mirror_dir": null,
+  "drive_root": null,
+  "operator": "",
   "ffmpeg_path": null,
   "whisper_model": "small",
   "max_tts_calls_per_run": 60,

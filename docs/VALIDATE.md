@@ -1,8 +1,9 @@
 # Validation runbook — `max-strength_2026-03-12`
 
-Run this on a **real machine** (a team Mac with the environment set up), not in
-a cloud/web session — it needs Google Drive Desktop, `ffmpeg-full`, the Python
-venv, and the API keys. Its job is to confirm the pipeline still produces
+Run this on a **real machine** (a team machine with the environment set up),
+not in a cloud/web session — it needs Drive access (gdrive auth or the Desktop
+mount), a libass-capable ffmpeg, the Python venv, and the API keys. Its job is
+to confirm the pipeline still produces
 known-good output *and* that the recent fixes actually landed, before trusting
 any of it on a new video.
 
@@ -18,8 +19,12 @@ the fix needs to prove out.
 - [ ] `ffmpeg-full` installed (`brew install ffmpeg-full` — plain `ffmpeg` lacks libass and silently skips subtitle burn-in)
 - [ ] Python 3.14 + venv created via `cn-pipeline-setup`
 - [ ] `.env` filled: `ELEVENLABS_API_KEY`, `KIE_API_KEY` (optional `FRAMEIO_TOKEN`)
-- [ ] `config.json` filled: `drive_root` points at the synced `General` Shared Drive
-- [ ] Google Drive Desktop running and the project folder actually synced locally (open the folder in Finder and confirm the `.mp4` is a real file, not a cloud placeholder)
+- [ ] Storage set up — **gdrive mode (default):** `cn-pipeline drive auth` done once, then
+      `cn-pipeline drive pull --project-id max-strength_2026-03-12` (downloads the master +
+      `/CN/` into the local mirror and claims the project). **mount mode:** `drive_root` in
+      `config.json` points at the synced `General` Shared Drive, Google Drive Desktop running,
+      and the project folder actually synced locally (open it in Finder and confirm the `.mp4`
+      is a real file, not a cloud placeholder)
 
 Sanity-check the environment resolves before spending any API calls:
 

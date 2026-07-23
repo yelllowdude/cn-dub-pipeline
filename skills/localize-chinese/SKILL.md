@@ -24,6 +24,23 @@ skill, and if it has been, the doc wins.
 
 ## Before starting
 
+**If this machine is in gdrive storage mode** (the team default — `storage:
+"gdrive"` in config.json), fetch the project and claim it first:
+
+```
+cn-pipeline drive pull --project-id {id}
+```
+
+This downloads the master, `{id}_me.wav`, everything in `/CN/`, and the
+project's shared scratch state (translations, paid TTS cache, Frame.io
+review state, spend counter) into the local mirror + `runs/{id}/`, and
+**claims the project** so a second operator gets a loud error instead of
+silently double-spending TTS or forking the Frame.io review stack. If the
+pull is refused because someone else holds the claim, stop and tell the
+user who has it — never `--steal` on your own initiative. Machines in
+`mount` mode (Drive for Desktop synced locally) skip this; the commands
+below work directly on the mount either way.
+
 Run `cn-pipeline preflight --project-id {id}`. If it errors on a missing
 Python environment, `.env`, or `config.json`, stop and tell the user to run
 `cn-pipeline-setup` once first (see README) — don't try to work around a
@@ -195,6 +212,17 @@ chunks whose lines actually changed — never trust or hand-edit the files in
    guess. Re-render, re-submit if the changes were substantial, and only move
    on once the reviewer signs off.
 
+   **gdrive mode: push after every deliverable-producing stage boundary** —
+   at minimum after step 8's renders pass verify, and again after any
+   review re-cut — with:
+   ```
+   cn-pipeline drive push --project-id {id}
+   ```
+   Uploads are md5-diffed (unchanged files cost nothing), and the push also
+   syncs the paid TTS cache + review state to `/CN/_pipeline/scratch/` so
+   any teammate can resume the project without re-spending. Keep the claim
+   while the review loop is open; release it at hand-off (step 10).
+
 10. **Hand off.** Everything from here — uploading to Bilibili, scheduling,
    what "good" output looks like on review — is `docs/cn_staff_handoff.html`'s
    job, not this skill's. Write the Notion Chinese DB row (title, description,
@@ -204,6 +232,12 @@ chunks whose lines actually changed — never trust or hand-edit the files in
    **Product names stay in English everywhere** (titles, descriptions, subs,
    dub): "Pistol Squat Cheat Sheet", "Playbook", etc. — see the glossary's
    locked-terms table. Translate around the name, never the name.
+
+   **gdrive mode: final push + release.** The hand-off isn't done until the
+   deliverables and scratch state are on Drive and the claim is returned:
+   ```
+   cn-pipeline drive push --project-id {id} --release
+   ```
 
    **Publish-status reminder block — add at the TOP of the row's page content
    on every new project (temporary convention while Bilibili API access is
