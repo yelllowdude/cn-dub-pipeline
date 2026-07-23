@@ -51,6 +51,15 @@ winning title from the Notion source row, thumbnail source, sponsor
 detection. Those are yours; the sponsor check is scheduled explicitly in
 stage 2 below.
 
+**Mode — new videos run in native dub mode.** Set it before stage 3:
+`cn-pipeline mode set --project-id {id} --dub-mode native`. The native
+sequence lives at the end of this file and replaces steps 3, 6 and 7 of the
+sequence below; everything else is shared. Cue-locked (steps 1–10 exactly as
+written) is legacy — kept only for existing cue-locked projects, not chosen
+for new work. The mechanical default for an unset project is still
+`cue_locked` (so old runs are never silently changed), which is why setting
+native is an explicit one-liner rather than automatic.
+
 **Re-runs are safe by default.** Every mechanical command prints `SKIP_OK`
 and does nothing when its outputs are already up to date; pass `--force` to
 redo a stage, and downstream stages then rerun automatically (their inputs
@@ -269,13 +278,15 @@ call past the cap raises instead of spending. If you hit a `SpendCapError`,
 that *is* the flag — report what burned the budget; don't raise the cap or
 delete the counter to push through without the user's say-so.
 
-## Native dub mode (dub-first, anchor-synced) — pilot
+## Native dub mode (dub-first, anchor-synced) — the default for new videos
 
-The classic sequence above is **cue-locked**: Chinese speech is tempo-forced
-into the English cue grid. Native reviewers consistently read that as "rushed /
-feels off", so there is a second mode that inverts the priority: **write
+The cue-locked sequence above tempo-forces Chinese speech into the English cue
+grid; native reviewers consistently read that as "rushed / feels off". **Native
+mode is the default for every new video** and inverts the priority: **write
 natural Chinese first, dub it at natural pace synced to visual anchors, derive
-the subtitles from the finished dub.** Opt in per project:
+the subtitles from the finished dub.** Set it explicitly per project (the
+mechanical default for an unset project stays cue_locked so existing runs are
+untouched):
 
 ```
 cn-pipeline mode set --project-id {id} --dub-mode native
@@ -316,6 +327,3 @@ publish — is unchanged):
 5. Close-out gates: `cn-pipeline dub verify-anchors` (every passage's speech
    onset within ±500ms of its anchor, no bleed) AND `render verify`, then the
    normal Frame.io review.
-
-Pilot rule (2026-07-21): run the next new video BOTH ways — cue-locked v1 and
-native v2 stacked on one Frame.io share — and let the native reviewer A/B them.
