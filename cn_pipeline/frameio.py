@@ -52,7 +52,7 @@ def parse_cndub_cues(srt_path: Path) -> list[dict]:
     raw = Path(srt_path).read_text(encoding="utf-8")
     cues = []
     for block in [b for b in raw.strip().split("\n\n") if b.strip()]:
-        lines = block.split("\n")
+        lines = block.strip("\n").split("\n")
         idx = int(lines[0])
         start, end = lines[1].split(" --> ")
         text_lines = lines[2:]
@@ -239,7 +239,20 @@ def _ims_post(data: dict) -> dict:
         headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=30,
     )
     if resp.status_code != 200:
-        raise ConfigError(f"Adobe IMS token request failed ({resp.status_code}): {resp.text[:300]}")
+        msg = f"Adobe IMS token request failed ({resp.status_code}): {resp.text[:300]}"
+        # IMS rejects a dead refresh token with a bare `access_denied` and no
+        # description. Seen in the wild when the token's own JWT expiry was
+        # still days away -- the bound Adobe sign-in session had been
+        # invalidated. Nothing in the message says so, hence the hint.
+        if data.get("grant_type") == "refresh_token" and "access_denied" in resp.text:
+            msg += (
+                "\n\nThe stored FRAMEIO_REFRESH_TOKEN was rejected. This can happen even while "
+                "the token's own expiry is in the future, if the Adobe sign-in session it was "
+                "issued against has been invalidated. Re-authenticate with "
+                "`cn-pipeline review auth` and follow the sign-in link; it writes a fresh "
+                "token to .env."
+            )
+        raise ConfigError(msg)
     return resp.json()
 
 
@@ -254,15 +267,35 @@ def _cached_token(mint) -> str:
     return _token_cache["value"]
 
 
+def _mint_via_refresh(cfg) -> dict:
+    """Refresh-token grant, persisting the returned refresh token if it changed.
+
+    IMS echoes a refresh_token back on this grant. Observed 2026-07-28: it is
+    byte-identical to the one we sent, i.e. no rotation today -- so this is
+    defensive, not a fix for any failure we've actually seen. But if IMS ever
+    does start rotating, silently dropping the new token would leave the next
+    run authenticating with a dead one and getting a bare `access_denied`,
+    which is near-undiagnosable from the error alone. Cheap to write back."""
+    tok = _ims_post({
+        "grant_type": "refresh_token",
+        "client_id": cfg.frameio_client_id,
+        "client_secret": cfg.frameio_client_secret,
+        "refresh_token": cfg.frameio_refresh_token,
+        "scope": cfg.frameio_ims_scope,
+    })
+    rotated = tok.get("refresh_token")
+    if rotated and rotated != cfg.frameio_refresh_token:
+        save_refresh_token_to_env(rotated)
+        cfg.frameio_refresh_token = rotated
+    return tok
+
+
 def _access_token(cfg) -> str:
     """Resolve a usable V4 access token from whatever auth is configured:
     User-Auth refresh token > S2S client credentials > static pasted token."""
     cid, secret = cfg.frameio_client_id, cfg.frameio_client_secret
     if cid and secret and cfg.frameio_refresh_token:
-        return _cached_token(lambda: _ims_post({
-            "grant_type": "refresh_token", "client_id": cid, "client_secret": secret,
-            "refresh_token": cfg.frameio_refresh_token, "scope": cfg.frameio_ims_scope,
-        }))
+        return _cached_token(lambda: _mint_via_refresh(cfg))
     if cid and secret:
         return _cached_token(lambda: _ims_post({
             "grant_type": "client_credentials", "client_id": cid, "client_secret": secret,
