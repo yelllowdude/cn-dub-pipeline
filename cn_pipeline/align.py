@@ -144,7 +144,10 @@ def write_aligned_srt(cues: list[tuple], out_path: Path) -> None:
     monotonic-clamped (see clamp_monotonic)."""
     lines = []
     for i, (a, b, zh_t, en_t) in enumerate(cues, 1):
-        lines += [str(i), f"{fmt_srt_time(a)} --> {fmt_srt_time(b)}", zh_t, en_t, ""]
+        block = [str(i), f"{fmt_srt_time(a)} --> {fmt_srt_time(b)}", zh_t]
+        if en_t:
+            block.append(en_t)
+        lines += block + [""]
     Path(out_path).write_text("\n".join(lines), encoding="utf-8")
 
 
