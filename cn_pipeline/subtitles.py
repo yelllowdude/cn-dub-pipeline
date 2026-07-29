@@ -153,11 +153,41 @@ def _split_at(text: str, marks: str) -> list[str]:
     return parts
 
 
+def _is_word_char(ch: str) -> bool:
+    """Part of a Latin/alphanumeric word run -- the kind of token that must
+    never be chopped through. CJK is deliberately excluded: Chinese breaks
+    cleanly between any two characters, English does not."""
+    return ch.isascii() and (ch.isalnum() or ch in "'-.")
+
+
+def _forced_break(p: str) -> int:
+    """Index to chop `p` at, never landing inside a Latin word run.
+
+    The cap is otherwise hard, but a locked English product name can be
+    longer than it -- "Calisthenics Playbook" is 21 chars against a cap of
+    20, and the glossary requires product names stay English. A blind
+    p[:ZH_MAX_CHARS] slice rendered that as "Calisthenics Playboo" / "k",
+    caught by a native reviewer on walking-is-not-exercise_2025-10-18.
+    When the cap lands mid-run we extend past the run rather than back off,
+    so the name survives whole on one line; Latin glyphs are far narrower
+    than CJK, so a cue a few chars over still fits the frame."""
+    i = ZH_MAX_CHARS
+    if i >= len(p):
+        return len(p)
+    if _is_word_char(p[i - 1]) and _is_word_char(p[i]):
+        while i < len(p) and _is_word_char(p[i]):
+            i += 1
+    return i
+
+
 def split_zh_cues(text: str) -> list[str]:
-    """Split one spoken-Chinese passage into subtitle cue lines, HARD-capped
-    at ZH_MAX_CHARS. Break priority: sentence enders > colon/dash > comma >
+    """Split one spoken-Chinese passage into subtitle cue lines, capped at
+    ZH_MAX_CHARS. Break priority: sentence enders > colon/dash > comma >
     forced break at the cap (a comma-less stretch must still break). Tiny
-    trailing fragments merge into the previous cue when the cap allows."""
+    trailing fragments merge into the previous cue when the cap allows.
+
+    The cap is hard for CJK. The one documented exception is an unbreakable
+    Latin word run longer than the cap (see _forced_break)."""
     cues = []
     for sentence in _split_at(text.strip(), _ZH_SENTENCE_END):
         sentence = sentence.strip()
@@ -169,12 +199,16 @@ def split_zh_cues(text: str) -> list[str]:
                 break
             pieces = [q for p in pieces
                       for q in ([p] if len(p) <= ZH_MAX_CHARS else _split_at(p, marks))]
-        # forced break: whatever still exceeds the cap gets chopped at the cap
+        # forced break: whatever still exceeds the cap gets chopped at the
+        # cap, except never through a Latin word run (see _forced_break)
         forced = []
         for p in pieces:
             while len(p) > ZH_MAX_CHARS:
-                forced.append(p[:ZH_MAX_CHARS])
-                p = p[ZH_MAX_CHARS:]
+                cut = _forced_break(p)
+                if cut >= len(p):
+                    break
+                forced.append(p[:cut])
+                p = p[cut:]
             if p:
                 forced.append(p)
         # merge tiny fragments into their predecessor when the cap allows
