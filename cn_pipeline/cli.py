@@ -20,7 +20,7 @@ from pathlib import Path
 
 from cn_pipeline import (align, anchors, doctor, dub, dub_native, frameio, gdrive,
                          notion_row, paths, publish, render, screentext, shared_state,
-                         subtitles, thumbnail)
+                         subtitles, team, thumbnail)
 from cn_pipeline.config import ConfigError, get_config
 
 
@@ -858,6 +858,94 @@ def cmd_drive_status(args):
           + (f" -- STALE, {age:.0f}h idle, takeable without --steal" if stale else ""))
 
 
+def _add_team_parsers(sub) -> None:
+    """`team export` / `team import`. Machine-level setup, so no --project-id."""
+    group = sub.add_parser("team").add_subparsers(dest="cmd", required=True)
+
+    export_p = group.add_parser("export")
+    export_p.add_argument("--out", default=None,
+                          help=f"bundle path (default ./{team.DEFAULT_BUNDLE_NAME})")
+    export_p.set_defaults(func=cmd_team_export)
+
+    import_p = group.add_parser("import")
+    import_p.add_argument("--file", required=True, help="bundle from `team export`")
+    import_p.add_argument("--overwrite", action="store_true",
+                          help="replace local values that differ from the bundle "
+                               "(default keeps whatever this machine already has)")
+    import_p.add_argument("--dry-run", action="store_true", dest="dry_run",
+                          help="show what would change, write nothing")
+    import_p.set_defaults(func=cmd_team_import)
+
+
+def cmd_team_export(args):
+    """Bundle the shared service-account credentials for a teammate's machine.
+    Machine-local and per-person values are deliberately left behind -- see
+    cn_pipeline.team."""
+    from cn_pipeline.config import CONFIG_PATH, ENV_PATH
+    dest = Path(args.out).expanduser() if args.out else Path(team.DEFAULT_BUNDLE_NAME)
+    try:
+        path, bundle = team.export_from_machine(ENV_PATH, CONFIG_PATH, dest)
+    except team.TeamBundleError as e:
+        sys.exit(str(e))
+    print(f"wrote {path} (0600)")
+    print(f"  {len(bundle['credentials'])} shared credential(s): "
+          + ", ".join(sorted(bundle["credentials"])))
+    if bundle["config"]:
+        print(f"  {len(bundle['config'])} shared config key(s): "
+              + ", ".join(sorted(bundle["config"])))
+    left = bundle["excluded"]["credentials"] + bundle["excluded"]["config"]
+    if left:
+        print("  NOT included (machine-local or per-person): " + ", ".join(sorted(left)))
+    print("\nThis file contains live keys and a refresh token. Put it in the team "
+          "password vault next to the other keys -- not in the repo, and not in the "
+          "Shared Drive folder the pipeline reads.")
+    print("Teammate then runs:  cn-pipeline team import --file <path>")
+
+
+def cmd_team_import(args):
+    """Adopt a shared credential bundle. Existing local values are kept unless
+    --overwrite, so a teammate who already authenticated a service themselves
+    doesn't silently lose it."""
+    from cn_pipeline.config import CONFIG_PATH, ENV_PATH, save_env_var
+    try:
+        bundle = team.load_bundle(Path(args.file).expanduser())
+    except team.TeamBundleError as e:
+        sys.exit(str(e))
+
+    env = team._read_env(Path(ENV_PATH))
+    config = (json.loads(Path(CONFIG_PATH).read_text(encoding="utf-8"))
+              if Path(CONFIG_PATH).exists() else {})
+    plan = team.plan_import(bundle, env, config, overwrite=args.overwrite)
+
+    for k in sorted(plan["env_add"]):
+        print(f"  + {k}")
+    for k in sorted(plan["config_add"]):
+        print(f"  + config.{k} = {plan['config_add'][k]!r}")
+    for k in plan["env_same"]:
+        print(f"  = {k} (already identical)")
+    for k in sorted(plan["env_conflict"]):
+        print(f"  {'~' if args.overwrite else '!'} {k} differs locally"
+              + (" -- overwriting" if args.overwrite else " -- KEPT (use --overwrite to replace)"))
+    for k in sorted(plan["config_conflict"]):
+        print(f"  {'~' if args.overwrite else '!'} config.{k} differs locally"
+              + (" -- overwriting" if args.overwrite else " -- KEPT (use --overwrite to replace)"))
+    if plan["refused"]:
+        print("  skipped (machine-local, never imported): " + ", ".join(plan["refused"]))
+
+    if args.dry_run:
+        print("\n--dry-run: nothing written.")
+        return
+    if not (plan["env_writes"] or plan["config_writes"]):
+        print("\nnothing to do -- this machine already has everything in the bundle.")
+    else:
+        team.apply_import(plan, save_env_var, Path(CONFIG_PATH))
+        print(f"\nwrote {len(plan['env_writes'])} credential(s) and "
+              f"{len(plan['config_writes'])} config key(s).")
+    print("Still yours to set on this machine: drive_root (where Drive for Desktop "
+          "mounted) and operator (the label teammates see on a claim).")
+    print("Then run:  cn-pipeline doctor")
+
+
 def cmd_notion_row(args):
     """Validate and render the Chinese-DB row. The skill posts it; this fixes
     its shape so every operator's row looks the same and nothing is forgotten."""
@@ -1218,6 +1306,8 @@ def main():
     drive_claim.add_argument("--steal", action="store_true")
     add(drive_group, "release", cmd_drive_release)
     add(drive_group, "status", cmd_drive_status)
+
+    _add_team_parsers(sub)
 
     notion_group = sub.add_parser("notion").add_subparsers(dest="cmd", required=True)
     notion_row_p = add(notion_group, "row", cmd_notion_row)
