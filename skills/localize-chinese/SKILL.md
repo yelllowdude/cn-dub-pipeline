@@ -24,22 +24,48 @@ skill, and if it has been, the doc wins.
 
 ## Before starting
 
-**If this machine is in gdrive storage mode** (the team default — `storage:
-"gdrive"` in config.json), fetch the project and claim it first:
+**Claim the project first, in both storage modes.** Two operators on the same
+video double-spend the TTS budget and fork the Frame.io version stack into two
+links nobody can reconcile.
 
 ```
 cn-pipeline drive pull --project-id {id}
 ```
 
-This downloads the master, `{id}_me.wav`, everything in `/CN/`, and the
-project's shared scratch state (translations, paid TTS cache, Frame.io
-review state, spend counter) into the local mirror + `runs/{id}/`, and
-**claims the project** so a second operator gets a loud error instead of
-silently double-spending TTS or forking the Frame.io review stack. If the
-pull is refused because someone else holds the claim, stop and tell the
-user who has it — never `--steal` on your own initiative. Machines in
-`mount` mode (Drive for Desktop synced locally) skip this; the commands
-below work directly on the mount either way.
+In `gdrive` mode this downloads the master, `{id}_me.wav`, everything in
+`/CN/`, and the shared scratch state (translations, paid TTS cache, Frame.io
+review state, spend counter). In `mount` mode the media is already on disk, so
+it restores the shared scratch and claims. Either way it **claims the
+project**, and every later command refreshes the claim automatically. If the
+claim is refused because someone else holds it, **stop and tell the user who
+has it** — never `--steal` on your own initiative.
+
+`cn-pipeline drive status --project-id {id}` says who holds it. A claim idle
+for 12h+ is stale and is taken over automatically; if that happens, say so,
+because it means someone's run died partway.
+
+Release at hand-off (step 10) — an unreleased claim blocks your teammates.
+
+### Announce the claim in Notion
+
+Create the Chinese-DB row **now, at claim time**, not at the end of the run. An
+empty row that exists is how a teammate discovers the video is being worked;
+a perfect row that appears three hours later tells them nothing.
+
+The row needs only its title and the project link at this point. Then post
+**one comment** on it:
+
+> 🤖 *Claude posted this, not a human.*
+> Claimed for Chinese localization — {operator}@{machine}, {timestamp}.
+> Frame.io link and deliverables land on this row when the run finishes.
+
+Use `cn-pipeline drive status --project-id {id}` for the operator/machine
+values so the comment and the lock file agree.
+
+**Do not add Notion properties for this.** The claim lives in
+`CN/_pipeline/claim.json` (that's what actually enforces it) and the comments
+are the human-readable trail. Two comments per row, total: this one, and the
+done comment in step 10.
 
 Run `cn-pipeline preflight --project-id {id}`. If it errors on a missing
 Python environment, `.env`, or `config.json`, stop and tell the user to run
@@ -168,7 +194,21 @@ chunks whose lines actually changed — never trust or hand-edit the files in
    cn-pipeline dub mix-me --project-id {id}
    ```
    Mixes the tightened VO with the project's `{id}_me.wav` background bed
-   (music + effects, no VO). If `{id}_me.wav` doesn't exist at the project
+   (music + effects, no VO).
+
+   **If you generated the bed yourself, say so:** `--me-source generated`. A
+   staff-prepped bed is mixed at full level and gets pulled down under the
+   voice; a Demucs-separated bed is thinner and gets a boost instead. One gain
+   can't serve both, and the wrong one either buries the bed or lets it fight
+   the dub. It's recorded in `project.json`, so pass it once — and changing it
+   re-mixes rather than skipping past a bed at the wrong level. Default is
+   `provided`, which is correct whenever staff prepped the file.
+
+   You cannot infer this from the file: measured across real projects, the
+   separated and staff-prepped beds' overall levels overlap completely. Declare
+   it from how the file was actually produced.
+
+   If `{id}_me.wav` doesn't exist at the project
    root and one should be generated (staff hasn't prepped one, but the
    source video clearly has a music/effects bed worth keeping under the
    dub), separate it from the master's full audio track with Demucs
@@ -203,6 +243,13 @@ chunks whose lines actually changed — never trust or hand-edit the files in
    ```
    cn-pipeline review submit --project-id {id}
    ```
+   This uploads a **1080p proxy**, not the 4K deliverable — a 10-minute video
+   is 1.4 GB at 4K and ~310 MB as a proxy, and the reviewer is judging
+   translation, register and sync, none of which 4K carries. Burned subtitles
+   stay exactly as legible (they're sized as a fraction of frame height) and
+   comment framestamps map to the same cues. Pass `--full` only when someone is
+   specifically checking image quality.
+
    Paste the returned link into the Chinese DB's `Frame.io link` field and set
    `Status: In review`. (Until the Frame.io upload API is verified, `submit`
    will tell you to upload the `{id}_cndub.mp4` by hand and share it — the rest
@@ -234,25 +281,54 @@ chunks whose lines actually changed — never trust or hand-edit the files in
 
 10. **Hand off.** Everything from here — uploading to Bilibili, scheduling,
    what "good" output looks like on review — is `docs/cn_staff_handoff.html`'s
-   job, not this skill's. Write the Notion Chinese DB row (title, description,
-   tags, ad-disclosure section if `Contains ads?`) per `cn_workflow.html`'s
-   Data Model section, set `Status: Review draft`, and stop.
+   job, not this skill's.
+
+   **Fill in the row you created at claim time.** Author the creative fields
+   into `runs/{id}/notion_row.json`, then let the CLI validate and lay it out:
+
+   ```
+   cn-pipeline notion row --project-id {id} --init    # first time only
+   cn-pipeline notion row --project-id {id}           # validate + render
+   ```
+
+   You write `title_zh`, `title_options_zh` (all 3 candidates from step 4),
+   `description_zh`, `tags_zh`, `contains_ads` and — if there is a sponsor —
+   `ad_disclosure_zh`. The command fills the mechanical fields from what
+   actually shipped, refuses to render until the row is complete, and prints
+   the page body from one fixed template so every operator's row has the same
+   shape. Post that output; don't re-improvise the layout.
+
+   `contains_ads` has **no default** — it's a legal disclosure and can't be
+   derived from anything on disk, so validation fails until you state it. Check
+   the source Notion row's sponsor field and the English audio; if the English
+   video never says a code, the code does not go in the dub (description only).
+
+   Set `Status: Review draft`, then post the **second and final comment**:
+
+   > 🤖 *Claude posted this, not a human.*
+   > Localization run finished — released, {timestamp}.
+   > Frame.io: {review link} · deliverables in `/CN/` · dub mode: {mode}
+   > Needs a human: {anything from the review queue you couldn't resolve, or "nothing"}
+
+   That "needs a human" line is the point of the comment — it's the one place
+   an unresolved judgment call gets recorded where the next person will see it.
 
    **Product names stay in English everywhere** (titles, descriptions, subs,
    dub): "Pistol Squat Cheat Sheet", "Playbook", etc. — see the glossary's
    locked-terms table. Translate around the name, never the name.
 
-   **gdrive mode: final push + release.** The hand-off isn't done until the
-   deliverables and scratch state are on Drive and the claim is returned:
+   **Final push + release — both storage modes.** The hand-off isn't done until
+   the shared scratch state is on Drive and the claim is returned. Leaving a
+   claim held blocks every teammate for 12 hours until it goes stale:
    ```
    cn-pipeline drive push --project-id {id} --release
    ```
 
-   **Publish-status reminder block — add at the TOP of the row's page content
-   on every new project (temporary convention while Bilibili API access is
-   pending; the whole block gets deleted once it's live):**
+   **Publish-status reminder block.** `notion row` already renders this at the
+   TOP of the page body — don't hand-write a second copy, or the two drift.
+   It's a 💡 callout, temporary while Bilibili API access is pending, and the
+   whole block gets deleted once it's live:
 
-   > 💡 callout, with this inside:
    > Delete this reminder once Bilibili API access is live.
    > Link in a publish property = published.
    > Publish statuses:
@@ -263,7 +339,8 @@ chunks whose lines actually changed — never trust or hand-edit the files in
    The three to-dos mirror the three URL properties (`ENsub Bilibili`,
    `CNdub Bilibili`, `CNdub YouTube`). Whoever fills a link property checks
    (and strikes through) the matching to-do — the publish skill does this for
-   its own uploads.
+   its own uploads. The wording lives in `cn_pipeline/notion_row.py`
+   (`REMINDER_BLOCK`); change it there, not here.
 
 ## If something fails partway
 

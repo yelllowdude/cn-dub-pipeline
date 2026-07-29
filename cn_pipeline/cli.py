@@ -18,8 +18,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from cn_pipeline import (align, anchors, doctor, dub, dub_native, frameio, gdrive, paths,
-                         publish, render, screentext, shared_state, subtitles, thumbnail)
+from cn_pipeline import (align, anchors, doctor, dub, dub_native, frameio, gdrive,
+                         notion_row, paths, publish, render, screentext, shared_state,
+                         subtitles, thumbnail)
 from cn_pipeline.config import ConfigError, get_config
 
 
@@ -34,6 +35,20 @@ def _dub_mode(scratch: Path) -> str:
     if pj.exists():
         return json.loads(pj.read_text(encoding="utf-8")).get("dub_mode", "cue_locked")
     return "cue_locked"
+
+
+def _me_source(scratch: Path) -> str:
+    """Where this project's M&E bed came from, per runs/{id}/project.json.
+    Absent = "provided" (the staff-prepped norm), which is also the safe guess:
+    it attenuates rather than boosts, so a wrong assumption can't bury the
+    voice under the bed."""
+    pj = scratch / "project.json"
+    if pj.exists():
+        try:
+            return json.loads(pj.read_text(encoding="utf-8")).get("me_source", "provided")
+        except json.JSONDecodeError:
+            pass
+    return "provided"
 
 
 def _stage_gate(args, outputs: list[Path], inputs: list[Path] = ()) -> bool:
@@ -256,11 +271,27 @@ def cmd_dub_mix_me(args):
     if not me_wav.exists():
         print(f"no {me_wav.name} found at project root -- skipping, dub ships without a background bed")
         return
+    pj = scratch / "project.json"
+    if args.me_source:
+        data = json.loads(pj.read_text(encoding="utf-8")) if pj.exists() else {}
+        data["me_source"] = args.me_source
+        pj.parent.mkdir(parents=True, exist_ok=True)
+        pj.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    me_source = _me_source(scratch)
+
     out_path = scratch / "dub_master_mixed.wav"
-    if not _stage_gate(args, [out_path], [scratch / "dub_master_padded.wav", me_wav]):
+    # project.json is an input: changing me_source changes the gain, so the mix
+    # has to redo rather than SKIP_OK past a bed at the wrong level.
+    gate_inputs = [scratch / "dub_master_padded.wav", me_wav]
+    if pj.exists():
+        gate_inputs.append(pj)
+    if not _stage_gate(args, [out_path], gate_inputs):
         return
+    cfg = get_config()
+    gain = dub.gain_for_source(cfg, me_source)
+    print(f"M&E source: {me_source} -> gain {gain:+g} dB")
     result = dub.mix_me(scratch / "dub_master_padded.wav", me_wav, out_path,
-                        me_gain_db=get_config().me_gain_db)
+                        me_gain_db=gain)
     print(json.dumps(result, indent=2))
     print(f"wrote {out_path}")
 
@@ -827,6 +858,33 @@ def cmd_drive_status(args):
           + (f" -- STALE, {age:.0f}h idle, takeable without --steal" if stale else ""))
 
 
+def cmd_notion_row(args):
+    """Validate and render the Chinese-DB row. The skill posts it; this fixes
+    its shape so every operator's row looks the same and nothing is forgotten."""
+    scratch = _scratch(args.project_id)
+    if args.init:
+        try:
+            print(f"wrote {notion_row.write_stub(scratch)}")
+        except notion_row.RowError as e:
+            sys.exit(str(e))
+        print("Fill in title_zh, description_zh and contains_ads (true/false -- it is a "
+              "legal disclosure and has no default), then re-run without --init.")
+        return
+    project_dir = paths.resolve_project_dir(args.project_id)
+    try:
+        built = notion_row.build(args.project_id, project_dir, scratch)
+    except notion_row.RowError as e:
+        sys.exit(str(e))
+    if args.json:
+        print(json.dumps(built, ensure_ascii=False, indent=2))
+        return
+    print("Properties:")
+    for k, v in built["properties"].items():
+        print(f"  {k}: {v if v != '' else '(empty)'}")
+    print("\n--- page body ---\n")
+    print(built["page_body"])
+
+
 def cmd_review_auth(args):
     """One-time Frame.io V4 sign-in (User Authentication). Without --redirect-url,
     prints the IMS authorize URL to open; with it, exchanges the returned code for
@@ -864,9 +922,27 @@ def cmd_review_submit(args):
            else {"versions": {}, "stack_id": None, "share_id": None, "review_link": None})
     label = args.version or "v1"
 
+    # Upload a 1080p proxy, not the 4K deliverable (1.3 GB for a 10-min video).
+    # The reviewer judges translation, register and sync -- none of which 4K
+    # carries -- and comment framestamps map back to the same cues either way.
+    upload_path = out["cndub_mp4"]
+    if not args.full:
+        proxy_dir = scratch / "proxy"
+        proxy_dir.mkdir(parents=True, exist_ok=True)
+        proxy = proxy_dir / f"{out['cndub_mp4'].stem}_1080p.mp4"
+        if not proxy.exists() or proxy.stat().st_mtime < out["cndub_mp4"].stat().st_mtime:
+            print(f"rendering 1080p review proxy from {out['cndub_mp4'].name} ...")
+            proxy = render.render_review_proxy(out["cndub_mp4"], proxy,
+                                               proxy_dir / "render_proxy.log")
+        upload_path = proxy
+        if upload_path != out["cndub_mp4"]:
+            src_mb = out["cndub_mp4"].stat().st_size / 1e6
+            pxy_mb = upload_path.stat().st_size / 1e6
+            print(f"uploading proxy: {pxy_mb:,.0f} MB (vs {src_mb:,.0f} MB at 4K)")
+
     account_id = frameio._account_id(cfg)
     prior_assets = list(rec["versions"].values())
-    up = frameio.upload_file_for_review(out["cndub_mp4"])
+    up = frameio.upload_file_for_review(upload_path)
     new_asset = up["asset_id"]
     rec["versions"][label] = new_asset
 
@@ -1102,7 +1178,14 @@ def main():
     add(dub_group, "fix", cmd_dub_fix)
     add(dub_group, "finalize", cmd_dub_finalize)
     add(dub_group, "tighten", cmd_dub_tighten)
-    add(dub_group, "mix-me", cmd_dub_mix_me)
+    dub_mix_me = add(dub_group, "mix-me", cmd_dub_mix_me)
+    dub_mix_me.add_argument("--me-source", dest="me_source", default=None,
+                            choices=list(dub.ME_SOURCES),
+                            help="where {id}_me.wav came from: provided = staff-prepped "
+                                 "(attenuated under the VO); generated = separated from "
+                                 "the master with Demucs, which comes back quieter and "
+                                 "is boosted instead. Recorded in project.json, so pass "
+                                 "it once. Defaults to provided.")
     add(dub_group, "verify-anchors", cmd_dub_verify_anchors)
 
     thumb_group = sub.add_parser("thumbnail").add_subparsers(dest="cmd", required=True)
@@ -1136,12 +1219,23 @@ def main():
     add(drive_group, "release", cmd_drive_release)
     add(drive_group, "status", cmd_drive_status)
 
+    notion_group = sub.add_parser("notion").add_subparsers(dest="cmd", required=True)
+    notion_row_p = add(notion_group, "row", cmd_notion_row)
+    notion_row_p.add_argument("--init", action="store_true",
+                              help="write the notion_row.json stub to fill in")
+    notion_row_p.add_argument("--json", action="store_true",
+                              help="machine-readable: properties + rendered page body")
+
     review_group = sub.add_parser("review").add_subparsers(dest="cmd", required=True)
     # `auth` is global setup (no project-id), so it's registered directly.
     review_auth = review_group.add_parser("auth")
     review_auth.add_argument("--redirect-url", dest="redirect_url", default=None)
     review_auth.set_defaults(func=cmd_review_auth)
-    add(review_group, "submit", cmd_review_submit)
+    review_submit = add(review_group, "submit", cmd_review_submit)
+    review_submit.add_argument("--full", action="store_true",
+                               help="upload the full-resolution cndub instead of the "
+                                    "1080p review proxy (only when the reviewer is "
+                                    "specifically checking image quality)")
     review_fetch = add(review_group, "fetch", cmd_review_fetch)
     review_fetch.add_argument("--asset-id", dest="asset_id", default=None)
     review_fetch.add_argument("--comments-json", dest="comments_json", default=None)

@@ -72,7 +72,9 @@ def test_no_overrides_reported_when_config_matches_repo():
 
 def test_override_is_detected():
     """The real case: me_gain_db -4.0 in the repo, 2.0 on one machine, so that
-    operator's M&E bed sat 6 dB hotter than everyone else's."""
+    operator's M&E bed sat 6 dB hotter than everyone else's. (That override was
+    compensating for a distinction the single default didn't model -- see
+    test_me_gain.py -- which is exactly why it needed surfacing.)"""
     overrides = cfgmod.output_setting_overrides({"me_gain_db": 2.0})
     assert len(overrides) == 1, overrides
     key, repo_default, local = overrides[0]

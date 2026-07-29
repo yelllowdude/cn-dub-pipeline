@@ -3,7 +3,10 @@
 
   "whisper_model": "small",
 
+  "_me_gain_comment": "Two gains, because the M&E bed arrives two ways. A staff-prepped bed is mixed at full level and must be pulled DOWN under the dubbed VO. A bed separated out of the master by Demucs comes back noticeably quieter, so the same attenuation would bury it -- it needs a boost instead. Which one applies is recorded per project as me_source in runs/{id}/project.json.",
+
   "me_gain_db": -4.0,
+  "me_gain_db_generated": 2.0,
 
   "max_tts_calls_per_run": 60,
   "max_kie_calls_per_run": 5,

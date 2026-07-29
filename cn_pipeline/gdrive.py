@@ -74,7 +74,8 @@ CLAIM_FILENAME = "claim.json"
 # anchors, zh_script, project.json, frameio_review.json, api_spend.json and
 # the PAID chunks/ TTS cache -- goes up, because losing any of those either
 # re-spends money or forks review state.
-SCRATCH_EXCLUDE_DIRS = {"align_chunks", "align_passages", "screentext", "__pycache__"}
+SCRATCH_EXCLUDE_DIRS = {"align_chunks", "align_passages", "screentext", "proxy",
+                        "__pycache__"}
 SCRATCH_EXCLUDE_NAMES = {"audio_16k.wav", "dub_master_final.wav",
                          "dub_master_padded.wav", "dub_master_mixed.wav"}
 SCRATCH_EXCLUDE_SUFFIXES = {".log"}

@@ -396,6 +396,33 @@ def tighten(dub_master_path: Path, source_video_duration_ms: int, out_path: Path
 ME_GAIN_DB = -4.0
 
 
+ME_SOURCES = ("provided", "generated")
+
+
+def gain_for_source(cfg, me_source: str) -> float:
+    """Pick the M&E gain from where the bed came from.
+
+    The bed arrives two ways and they sit at different levels:
+
+      provided   staff-prepped alongside the master, mixed at full level.
+                 Needs pulling DOWN so it doesn't compete with the dubbed VO.
+      generated  separated out of the master with Demucs. Separation comes back
+                 noticeably quieter, so the same attenuation would bury it --
+                 it needs a boost instead.
+
+    One gain for both was the bug: whichever value you picked was wrong for the
+    other case, and the only way anyone compensated was to edit config.json by
+    hand, which silently changed every video that machine produced.
+
+    Unrecorded provenance resolves to "provided" -- the staff-prepped norm, and
+    the conservative choice, since guessing "generated" would boost a
+    full-level bed over the voice.
+    """
+    if me_source == "generated":
+        return float(cfg.me_gain_db_generated)
+    return float(cfg.me_gain_db)
+
+
 def mix_me(vo_path: Path, me_wav_path: Path, out_path: Path, me_gain_db: float = ME_GAIN_DB) -> dict:
     """Mix the tightened Chinese VO track with the project's {id}_me.wav
     background bed (music + effects, no VO, language-agnostic -- see
@@ -424,4 +451,12 @@ def mix_me(vo_path: Path, me_wav_path: Path, out_path: Path, me_gain_db: float =
     mixed = vo.overlay(me)
     mixed.export(out_path, format="wav")
 
-    return {"vo_ms": len(vo), "me_ms_before_trim": len(AudioSegment.from_wav(me_wav_path)), "final_ms": len(mixed)}
+    raw_me = AudioSegment.from_wav(me_wav_path)
+    # Report the levels. The gain is chosen from declared provenance, so these
+    # are how a wrong declaration gets caught: a "provided" bed that measures
+    # far below the VO is really a separated one, and vice versa.
+    return {"vo_ms": len(vo), "me_ms_before_trim": len(raw_me), "final_ms": len(mixed),
+            "me_gain_db": me_gain_db,
+            "vo_dbfs": round(vo.dBFS, 1),
+            "me_dbfs_in": round(raw_me.dBFS, 1),
+            "me_dbfs_after_gain": round(me.dBFS, 1)}

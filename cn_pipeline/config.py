@@ -27,11 +27,14 @@ FFMPEG_FULL_DEFAULT = "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg"
 
 # Settings that change the deliverable (or the spend policy) live in the repo,
 # not in each operator's config.json -- otherwise the same input renders
-# differently depending on whose laptop ran it. Observed in practice:
-# me_gain_db was -4.0 here and 2.0 on one machine, i.e. the M&E bed was mixed
-# 6 dB louder on that operator's videos than anyone else's, silently.
-# config.json can still override these (nothing is forced), but `doctor`
-# reports every override so the drift is visible.
+# differently depending on whose machine ran it. Observed in practice: one
+# machine carried me_gain_db 2.0 against the repo's -4.0, so the M&E bed was
+# mixed 6 dB louder on that operator's videos than anyone else's, silently.
+# That override turned out to be a real compensation for a case the single
+# default didn't model (see me_gain_db_generated below) -- which is exactly why
+# these belong in the repo: a per-machine value hides a missing distinction.
+# config.json can still override them (nothing is forced), but `doctor` reports
+# every override so the drift is visible.
 DEFAULTS_PATH = REPO_ROOT / "pipeline_defaults.json"
 
 # Keys read from DEFAULTS_PATH. Anything not listed here is machine-local
@@ -39,6 +42,7 @@ DEFAULTS_PATH = REPO_ROOT / "pipeline_defaults.json"
 OUTPUT_SETTING_KEYS = (
     "whisper_model",
     "me_gain_db",
+    "me_gain_db_generated",
     "max_tts_calls_per_run",
     "max_kie_calls_per_run",
     "max_screentext_clean_calls_per_run",
@@ -268,7 +272,10 @@ class Config:
         # Gain (dB) applied to the music/effects bed when `dub mix-me` lays it
         # under the Chinese VO. Tunable in config.json without a code change;
         # +6 dB is ~2x louder. Default -4 keeps it under the voice.
+        # Two gains: see pipeline_defaults.json. Which applies is per-project
+        # (me_source in project.json), resolved by cn_pipeline.dub.gain_for_source.
         self.me_gain_db = float(setting("me_gain_db", -4.0))
+        self.me_gain_db_generated = float(setting("me_gain_db_generated", 2.0))
 
         # Per-run paid-call caps (see cn_pipeline.spend). Defaults are sized
         # so a normal run never notices them: ~10-15 TTS chunks + re-split
