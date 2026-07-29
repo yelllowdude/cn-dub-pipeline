@@ -18,8 +18,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from cn_pipeline import (align, anchors, doctor, dub, dub_native, frameio, gdrive, paths,
-                         publish, render, screentext, shared_state, subtitles, thumbnail)
+from cn_pipeline import (align, anchors, doctor, dub, dub_native, frameio, gdrive,
+                         notion_row, paths, publish, render, screentext, shared_state,
+                         subtitles, thumbnail)
 from cn_pipeline.config import ConfigError, get_config
 
 
@@ -827,6 +828,33 @@ def cmd_drive_status(args):
           + (f" -- STALE, {age:.0f}h idle, takeable without --steal" if stale else ""))
 
 
+def cmd_notion_row(args):
+    """Validate and render the Chinese-DB row. The skill posts it; this fixes
+    its shape so every operator's row looks the same and nothing is forgotten."""
+    scratch = _scratch(args.project_id)
+    if args.init:
+        try:
+            print(f"wrote {notion_row.write_stub(scratch)}")
+        except notion_row.RowError as e:
+            sys.exit(str(e))
+        print("Fill in title_zh, description_zh and contains_ads (true/false -- it is a "
+              "legal disclosure and has no default), then re-run without --init.")
+        return
+    project_dir = paths.resolve_project_dir(args.project_id)
+    try:
+        built = notion_row.build(args.project_id, project_dir, scratch)
+    except notion_row.RowError as e:
+        sys.exit(str(e))
+    if args.json:
+        print(json.dumps(built, ensure_ascii=False, indent=2))
+        return
+    print("Properties:")
+    for k, v in built["properties"].items():
+        print(f"  {k}: {v if v != '' else '(empty)'}")
+    print("\n--- page body ---\n")
+    print(built["page_body"])
+
+
 def cmd_review_auth(args):
     """One-time Frame.io V4 sign-in (User Authentication). Without --redirect-url,
     prints the IMS authorize URL to open; with it, exchanges the returned code for
@@ -864,9 +892,27 @@ def cmd_review_submit(args):
            else {"versions": {}, "stack_id": None, "share_id": None, "review_link": None})
     label = args.version or "v1"
 
+    # Upload a 1080p proxy, not the 4K deliverable (1.3 GB for a 10-min video).
+    # The reviewer judges translation, register and sync -- none of which 4K
+    # carries -- and comment framestamps map back to the same cues either way.
+    upload_path = out["cndub_mp4"]
+    if not args.full:
+        proxy_dir = scratch / "proxy"
+        proxy_dir.mkdir(parents=True, exist_ok=True)
+        proxy = proxy_dir / f"{out['cndub_mp4'].stem}_1080p.mp4"
+        if not proxy.exists() or proxy.stat().st_mtime < out["cndub_mp4"].stat().st_mtime:
+            print(f"rendering 1080p review proxy from {out['cndub_mp4'].name} ...")
+            proxy = render.render_review_proxy(out["cndub_mp4"], proxy,
+                                               proxy_dir / "render_proxy.log")
+        upload_path = proxy
+        if upload_path != out["cndub_mp4"]:
+            src_mb = out["cndub_mp4"].stat().st_size / 1e6
+            pxy_mb = upload_path.stat().st_size / 1e6
+            print(f"uploading proxy: {pxy_mb:,.0f} MB (vs {src_mb:,.0f} MB at 4K)")
+
     account_id = frameio._account_id(cfg)
     prior_assets = list(rec["versions"].values())
-    up = frameio.upload_file_for_review(out["cndub_mp4"])
+    up = frameio.upload_file_for_review(upload_path)
     new_asset = up["asset_id"]
     rec["versions"][label] = new_asset
 
@@ -1136,12 +1182,23 @@ def main():
     add(drive_group, "release", cmd_drive_release)
     add(drive_group, "status", cmd_drive_status)
 
+    notion_group = sub.add_parser("notion").add_subparsers(dest="cmd", required=True)
+    notion_row_p = add(notion_group, "row", cmd_notion_row)
+    notion_row_p.add_argument("--init", action="store_true",
+                              help="write the notion_row.json stub to fill in")
+    notion_row_p.add_argument("--json", action="store_true",
+                              help="machine-readable: properties + rendered page body")
+
     review_group = sub.add_parser("review").add_subparsers(dest="cmd", required=True)
     # `auth` is global setup (no project-id), so it's registered directly.
     review_auth = review_group.add_parser("auth")
     review_auth.add_argument("--redirect-url", dest="redirect_url", default=None)
     review_auth.set_defaults(func=cmd_review_auth)
-    add(review_group, "submit", cmd_review_submit)
+    review_submit = add(review_group, "submit", cmd_review_submit)
+    review_submit.add_argument("--full", action="store_true",
+                               help="upload the full-resolution cndub instead of the "
+                                    "1080p review proxy (only when the reviewer is "
+                                    "specifically checking image quality)")
     review_fetch = add(review_group, "fetch", cmd_review_fetch)
     review_fetch.add_argument("--asset-id", dest="asset_id", default=None)
     review_fetch.add_argument("--comments-json", dest="comments_json", default=None)

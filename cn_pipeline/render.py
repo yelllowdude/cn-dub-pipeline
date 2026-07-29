@@ -179,6 +179,52 @@ def render_cndub(master_video: Path, zh_vo_wav: Path, bilingual_cndub_srt: Path,
     return out_path
 
 
+REVIEW_PROXY_HEIGHT = 1080
+REVIEW_PROXY_CRF = 23           # visually clean at 1080p; not a deliverable
+# videotoolbox is bitrate-driven, not CRF-driven. 3 Mbps is the floor that
+# still keeps burned subtitle edges clean at 1080p -- the reviewer is reading
+# text, so mushy glyphs are the one artifact that would actually cost us.
+# (Measured: 5M produced a 507 MB proxy from a 1.4 GB master -- barely worth
+# uploading; 3M lands near 300 MB with no visible difference on this footage.)
+REVIEW_PROXY_BITRATE = "3M"
+
+
+def render_review_proxy(cndub_mp4: Path, out_path: Path, log_path: Path) -> Path:
+    """A 1080p copy of the CN dub for native-speaker review.
+
+    Review used to upload the 4K deliverable itself -- 1.3 GB for a 10-minute
+    video. The reviewer is judging translation, register and lip-sync, none of
+    which 4K carries: burned subtitles are sized as a fraction of frame height
+    so they stay exactly as legible, and timing is untouched. A proxy is ~10x
+    smaller, which turns a long upload (and a slow scrub for the reviewer, who
+    is often not on a fast connection) into a short one.
+
+    Timing is preserved exactly -- no -shortest, no re-timing, video and audio
+    both copied through at the same duration -- because review comments are
+    framestamps that `review fetch` maps back onto the real cues.
+    """
+    cfg = get_config()
+    w, h = probe_dimensions(cfg.ffmpeg_path, cndub_mp4)
+    if h <= REVIEW_PROXY_HEIGHT:
+        # Already 1080p or smaller: re-encoding would only lose quality.
+        return cndub_mp4
+    args = video_encoder_args(cfg.ffmpeg_path)
+    if "libx264" in args:
+        args = ["-c:v", "libx264", "-preset", "veryfast",
+                "-crf", str(REVIEW_PROXY_CRF), "-pix_fmt", "yuv420p"]
+    else:
+        args = ["-c:v", "h264_videotoolbox", "-b:v", REVIEW_PROXY_BITRATE]
+    cmd = [
+        cfg.ffmpeg_path, "-y", "-i", str(cndub_mp4),
+        # -2 keeps the width even (H.264 requires it) and the aspect ratio exact
+        "-vf", f"scale=-2:{REVIEW_PROXY_HEIGHT}",
+        *args, "-c:a", "copy",
+        str(out_path),
+    ]
+    _run(cmd, log_path)
+    return out_path
+
+
 DURATION_TOLERANCE_MS = 100  # "within ~0.1s" per cn_workflow.html Stage 5
 
 
