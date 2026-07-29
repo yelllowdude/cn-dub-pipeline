@@ -52,11 +52,14 @@ def test_scratch_filter_keeps_paid_and_state_drops_regenerable():
         assert not scratch_syncable(rel), f"should NOT sync: {rel}"
 
 
-ME = {"operator": "alice", "host": "alices-mac"}
+ME = {"operator": "alice", "host": "alice-machine-id", "hostname": "alices-mac"}
 # An ACTIVE claim by someone else. It has to carry a live heartbeat: a claim
 # whose last_seen is a month old is abandoned, and abandoned claims are
 # takeable (see the staleness tests below).
-OTHER = dict(make_claim({"operator": "bob", "host": "bobs-mac"}))
+# host is the opaque machine id; hostname is the readable label shown in
+# claim messages (see describe_holder).
+OTHER = dict(make_claim({"operator": "bob", "host": "bob-machine-id",
+                         "hostname": "bobs-mac"}))
 
 
 def test_claim_fresh_when_absent_or_released():
@@ -70,7 +73,7 @@ def test_claim_reentrant_for_same_operator_and_host():
     assert claim_verdict(mine, ME, steal=False) == "mine"
     # same person, different machine is NOT re-entrant -- the scratch state
     # (TTS cache, spend counter) is per-machine, so this is a real handoff
-    other_host = dict(mine, host="alices-laptop")
+    other_host = dict(mine, host="alices-laptop-id", hostname="alices-laptop")
     try:
         claim_verdict(other_host, ME, steal=False)
         assert False, "expected ClaimError"
