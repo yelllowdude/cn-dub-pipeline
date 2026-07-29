@@ -18,7 +18,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from cn_pipeline import align, anchors, dub, dub_native, frameio, gdrive, paths, publish, render, screentext, subtitles, thumbnail
+from cn_pipeline import align, anchors, doctor, dub, dub_native, frameio, gdrive, paths, publish, render, screentext, subtitles, thumbnail
 from cn_pipeline.config import ConfigError, get_config
 
 
@@ -917,6 +917,20 @@ def cmd_render_verify(args):
     print(f"PASS: both outputs within {render.DURATION_TOLERANCE_MS}ms of source duration")
 
 
+def cmd_doctor(args):
+    """Pre-flight credentials, toolchain and paid-API balances before any
+    expensive work. Exits non-zero on any FAIL so it can gate a batch script."""
+    checks = doctor.run(args.project_id)
+    if args.json:
+        print(json.dumps([c.as_dict() for c in checks], indent=2, ensure_ascii=False))
+    else:
+        scope = f" (project: {args.project_id})" if args.project_id else ""
+        print(f"cn-pipeline doctor{scope}\n")
+        print(doctor.format_report(checks))
+    if any(c.status == doctor.FAIL for c in checks):
+        sys.exit(1)
+
+
 def main():
     p = argparse.ArgumentParser(prog="cn_pipeline")
     sub = p.add_subparsers(dest="group", required=True)
@@ -933,6 +947,16 @@ def main():
                                 "re-cut writes {id}_cndub_v2.mp4 without overwriting v1")
         sub_p.set_defaults(func=fn)
         return sub_p
+
+    # doctor is the only command whose --project-id is optional: with no
+    # project it checks the machine, with one it also estimates that project's
+    # paid work against the live balances.
+    doctor_p = sub.add_parser("doctor")
+    doctor_p.add_argument("--project-id", default=None,
+                          help="also check this project's files and estimate its "
+                               "TTS cost against the remaining ElevenLabs balance")
+    doctor_p.add_argument("--json", action="store_true", help="machine-readable output")
+    doctor_p.set_defaults(func=cmd_doctor)
 
     preflight_p = sub.add_parser("preflight")
     preflight_p.add_argument("--project-id", required=True)
