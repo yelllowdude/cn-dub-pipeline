@@ -1,0 +1,13 @@
+{
+  "_comment": "Settings that change the DELIVERABLE or the spend policy. Versioned here so every operator produces the same output from the same input. config.json may still override any of these, but `cn-pipeline doctor` reports each override as a warning so drift is visible rather than silent. Paths, storage mode and credentials belong in config.json instead -- those are legitimately per-machine.",
+
+  "whisper_model": "small",
+
+  "me_gain_db": -4.0,
+
+  "max_tts_calls_per_run": 60,
+  "max_kie_calls_per_run": 5,
+  "max_screentext_clean_calls_per_run": 40,
+
+  "screentext_enabled": false
+}

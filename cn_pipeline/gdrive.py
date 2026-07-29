@@ -38,11 +38,13 @@ fall back to the YouTube client credentials (same Google Cloud project works
 for both; only the consenting ACCOUNT differs).
 """
 
+import calendar
 import getpass
 import hashlib
 import json
 import socket
 import time
+import uuid
 from pathlib import Path
 
 import requests
@@ -112,32 +114,122 @@ def scratch_syncable(rel_path: str) -> bool:
     return True
 
 
-def claim_verdict(existing: dict | None, me: dict, steal: bool) -> str:
-    """Decide whether `me` may claim. Returns 'fresh'|'mine'|'stolen'; raises
-    ClaimError when someone else holds the claim and steal is False."""
+CLAIM_STALE_HOURS = 12
+# A claim is a lock, and any lock a crash can leave behind is a lock that
+# eventually strands the team. Every command that touches a claimed project
+# refreshes last_seen, so "stale" means genuinely nobody has run anything for
+# half a day -- almost always a crashed run or a laptop that went home, not a
+# colleague mid-render. Stale claims are taken over automatically (loudly).
+
+
+def _iso_now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _iso_to_epoch(stamp: str | None) -> float | None:
+    if not stamp:
+        return None
+    try:
+        return calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ"))
+    except (ValueError, TypeError):
+        return None
+
+
+def claim_age_hours(existing: dict, now_epoch: float | None = None) -> float | None:
+    """Hours since the holder last ran anything, or None if unknown. Falls back
+    to claimed_at for claims written before last_seen existed."""
+    then = _iso_to_epoch(existing.get("last_seen")) or _iso_to_epoch(existing.get("claimed_at"))
+    if then is None:
+        return None
+    return ((now_epoch if now_epoch is not None else time.time()) - then) / 3600.0
+
+
+def claim_verdict(existing: dict | None, me: dict, steal: bool,
+                  now_epoch: float | None = None) -> str:
+    """Decide whether `me` may claim. Returns 'fresh'|'mine'|'stolen'|'stale';
+    raises ClaimError when someone else actively holds the claim and steal is
+    False. 'stale' is a takeover of an abandoned claim -- allowed without
+    --steal, because refusing there just means the project is stuck."""
     if not existing or not existing.get("claimed"):
         return "fresh"
     if existing.get("operator") == me["operator"] and existing.get("host") == me["host"]:
         return "mine"
     if steal:
         return "stolen"
+    age = claim_age_hours(existing, now_epoch)
+    if age is not None and age >= CLAIM_STALE_HOURS:
+        return "stale"
+    since = existing.get("last_seen") or existing.get("claimed_at")
     raise ClaimError(
-        f"project is claimed by {existing.get('operator')}@{existing.get('host')} "
-        f"since {existing.get('claimed_at')}. Coordinate with them (they release with "
-        "`cn-pipeline drive release`), or take over deliberately with --steal."
+        f"project is claimed by {describe_holder(existing)} "
+        f"(last active {since}). Coordinate with them (they release with "
+        f"`cn-pipeline drive release`), take over deliberately with --steal, or wait "
+        f"-- an abandoned claim goes stale after {CLAIM_STALE_HOURS}h and is taken "
+        "over automatically."
     )
 
 
 def make_claim(me: dict) -> dict:
+    now = _iso_now()
     return {"claimed": True, "operator": me["operator"], "host": me["host"],
-            "claimed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+            "hostname": me.get("hostname", ""), "claimed_at": now, "last_seen": now}
+
+
+def describe_holder(claim: dict) -> str:
+    """Who to go talk to. `host` is an opaque machine id, so show the hostname
+    when the claim carries one."""
+    who = claim.get("operator") or "someone"
+    where = claim.get("hostname") or claim.get("host") or ""
+    return f"{who}@{where}" if where else who
+
+
+def touch_claim(existing: dict | None, me: dict) -> dict:
+    """Refresh the holder's heartbeat, preserving claimed_at. Called on every
+    command that runs against a project the caller already holds."""
+    if not existing or not existing.get("claimed"):
+        return make_claim(me)
+    return {**existing, "last_seen": _iso_now()}
+
+
+MACHINE_ID_FILENAME = ".machine_id"
+
+
+def machine_id() -> str:
+    """A stable per-machine identifier, persisted next to config.json.
+
+    socket.gethostname() was the obvious choice and is wrong: on a stock macOS
+    it can resolve to the machine's current DHCP address (observed in testing:
+    '192.168.1.84'). Claim re-entrancy compares this field, so a lease change
+    would turn an operator's own claim into a stranger's and lock them out of
+    their own project -- with an error telling them to coordinate with someone
+    who doesn't exist. A random id written once never moves.
+    """
+    from cn_pipeline.config import DATA_ROOT
+    path = Path(DATA_ROOT) / MACHINE_ID_FILENAME
+    try:
+        existing = path.read_text(encoding="utf-8").strip()
+        if existing:
+            return existing
+    except OSError:
+        pass
+    new_id = uuid.uuid4().hex[:12]
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(new_id + "\n", encoding="utf-8")
+    except OSError:
+        # Unwritable data dir: fall back to the hostname rather than handing
+        # out a fresh id per invocation, which would make claims un-reentrant.
+        return socket.gethostname()
+    return new_id
 
 
 def whoami(cfg=None) -> dict:
     operator = ""
     if cfg is not None:
         operator = getattr(cfg, "operator", "") or ""
-    return {"operator": operator or getpass.getuser(), "host": socket.gethostname()}
+    return {"operator": operator or getpass.getuser(),
+            "host": machine_id(),
+            "hostname": socket.gethostname()}
 
 
 def _file_md5(path: Path, cache: dict) -> str:
@@ -598,8 +690,10 @@ def _claim(client: DriveClient, cn_folder_id: str, me: dict, steal: bool) -> str
     pipeline_id = _pipeline_folder(client, cn_folder_id)
     existing, file_id = _read_claim(client, pipeline_id)
     verdict = claim_verdict(existing, me, steal)
-    if verdict != "mine":
-        _write_claim(client, pipeline_id, make_claim(me), file_id)
+    # 'mine' still writes -- it refreshes the heartbeat that keeps the claim
+    # from going stale under a long run.
+    data = touch_claim(existing, me) if verdict == "mine" else make_claim(me)
+    _write_claim(client, pipeline_id, data, file_id)
     return verdict
 
 
@@ -607,7 +701,7 @@ def _release(client: DriveClient, cn_folder_id: str, me: dict) -> None:
     pipeline_id = _pipeline_folder(client, cn_folder_id)
     existing, file_id = _read_claim(client, pipeline_id)
     data = {"claimed": False, "operator": me["operator"], "host": me["host"],
-            "released_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+            "hostname": me.get("hostname", ""), "released_at": _iso_now()}
     _write_claim(client, pipeline_id, data, file_id)
 
 

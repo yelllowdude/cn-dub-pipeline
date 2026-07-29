@@ -18,7 +18,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from cn_pipeline import align, anchors, doctor, dub, dub_native, frameio, gdrive, paths, publish, render, screentext, subtitles, thumbnail
+from cn_pipeline import (align, anchors, doctor, dub, dub_native, frameio, gdrive, paths,
+                         publish, render, screentext, shared_state, subtitles, thumbnail)
 from cn_pipeline.config import ConfigError, get_config
 
 
@@ -671,9 +672,9 @@ def _require_gdrive_mode():
     cfg = get_config()
     if cfg.storage != "gdrive":
         sys.exit(
-            "drive commands only apply when config.json's storage is \"gdrive\". "
+            "`drive auth` only applies when config.json's storage is \"gdrive\". "
             "This machine is in mount mode -- the Shared Drive is already synced "
-            "locally at drive_root, nothing to pull or push."
+            "locally at drive_root, so there is no API to authenticate against."
         )
     return cfg
 
@@ -696,13 +697,49 @@ def cmd_drive_auth(args):
     print(f"Saved GDRIVE_REFRESH_TOKEN to {path}. Drive storage is ready.")
 
 
+def _mount_project_dir(project_id: str) -> Path:
+    return paths.resolve_project_dir(project_id)
+
+
+def _print_claim_verdict(verdict: str) -> None:
+    if verdict == "stolen":
+        print("NOTE: claim taken over with --steal -- make sure the previous operator "
+              "has actually stopped, or you'll both pay for the same TTS.")
+    elif verdict == "stale":
+        print(f"NOTE: took over a claim abandoned for {gdrive.CLAIM_STALE_HOURS}h+ "
+              "(crashed run or a machine that went home). If that operator is still "
+              "working, stop and coordinate.")
+    elif verdict != "skipped":
+        print(f"claim: {verdict} (release with `cn-pipeline drive release`)")
+
+
 def cmd_drive_pull(args):
     """Fetch a project from the Shared Drive into the local mirror (master,
     me.wav, all /CN/ deliverables) and restore its shared scratch state into
     runs/{id}/. Claims the project so a second operator gets a loud error
-    instead of a silent race."""
-    _require_gdrive_mode()
+    instead of a silent race.
+
+    In mount mode the media is already on disk, so this is the scratch restore
+    half only: it claims the project and copies CN/_pipeline/scratch/ back into
+    runs/{id}/, which is how you inherit a colleague's paid TTS cache and their
+    Frame.io review stack instead of re-buying and forking them."""
+    cfg = get_config()
     scratch = _scratch(args.project_id)
+    if cfg.storage != "gdrive":
+        project_dir = _mount_project_dir(args.project_id)
+        try:
+            verdict = ("skipped" if args.no_claim
+                       else shared_state.claim(project_dir, steal=args.steal))
+        except shared_state.ClaimError as e:
+            sys.exit(f"claim refused: {e}")
+        restored = shared_state.sync_scratch_in(scratch, project_dir)
+        print(f"project at {project_dir}")
+        print(f"restored {len(restored)} shared scratch file(s)"
+              + (":" if restored else " (nothing shared yet, or already current)"))
+        for name in restored:
+            print(f"  {name}")
+        _print_claim_verdict(verdict)
+        return
     try:
         result = gdrive.pull(args.project_id, scratch, steal=args.steal,
                              force=args.force, claim=not args.no_claim)
@@ -714,18 +751,32 @@ def cmd_drive_pull(args):
     print(f"downloaded {n} file(s)" + (":" if n else " (everything already current)"))
     for name in result["downloaded"]:
         print(f"  {name}")
-    if result["claim"] == "stolen":
-        print("NOTE: claim taken over with --steal -- make sure the previous operator "
-              "has actually stopped, or you'll both pay for the same TTS.")
-    elif result["claim"] != "skipped":
-        print(f"claim: {result['claim']} (release with `drive push --release` or `drive release`)")
+    _print_claim_verdict(result["claim"])
 
 
 def cmd_drive_push(args):
     """Upload changed /CN/ deliverables + shared scratch state back to the
-    Shared Drive. Uploads are md5-diffed: unchanged files don't transfer."""
-    _require_gdrive_mode()
+    Shared Drive. Uploads are md5-diffed: unchanged files don't transfer.
+
+    In mount mode /CN/ is already the Drive folder, so this publishes the
+    shared scratch half: runs/{id}/ -> CN/_pipeline/scratch/, filtered to the
+    state that is paid for or irreplaceable."""
+    cfg = get_config()
     scratch = _scratch(args.project_id)
+    if cfg.storage != "gdrive":
+        project_dir = _mount_project_dir(args.project_id)
+        published = shared_state.sync_scratch_out(scratch, project_dir)
+        print(f"published {len(published)} shared scratch file(s)"
+              + (":" if published else " (already current)"))
+        for name in published:
+            print(f"  {name}")
+        if args.release:
+            shared_state.release(project_dir)
+            print("claim released.")
+        else:
+            print("claim kept -- release with `cn-pipeline drive release` when you "
+                  "hand the project off.")
+        return
     result = gdrive.push(args.project_id, scratch, release=args.release)
     n = len(result["uploaded"])
     print(f"uploaded {n} file(s)" + (":" if n else " (Drive already current)"))
@@ -738,28 +789,42 @@ def cmd_drive_push(args):
 
 
 def cmd_drive_claim(args):
-    _require_gdrive_mode()
+    cfg = get_config()
     try:
-        verdict = gdrive.claim_project(args.project_id, steal=args.steal)
+        if cfg.storage == "gdrive":
+            verdict = gdrive.claim_project(args.project_id, steal=args.steal)
+        else:
+            verdict = shared_state.claim(_mount_project_dir(args.project_id),
+                                         steal=args.steal)
     except gdrive.ClaimError as e:
         sys.exit(f"claim refused: {e}")
-    print(f"claim: {verdict}")
+    _print_claim_verdict(verdict)
 
 
 def cmd_drive_release(args):
-    _require_gdrive_mode()
-    gdrive.release_project(args.project_id)
+    cfg = get_config()
+    if cfg.storage == "gdrive":
+        gdrive.release_project(args.project_id)
+    else:
+        shared_state.release(_mount_project_dir(args.project_id))
     print("claim released.")
 
 
 def cmd_drive_status(args):
-    _require_gdrive_mode()
-    claim = gdrive.claim_status(args.project_id)
+    cfg = get_config()
+    if cfg.storage == "gdrive":
+        claim = gdrive.claim_status(args.project_id)
+    else:
+        claim = shared_state.status(_mount_project_dir(args.project_id))
     if not claim or not claim.get("claimed"):
         print("unclaimed")
-    else:
-        print(f"claimed by {claim.get('operator')}@{claim.get('host')} "
-              f"since {claim.get('claimed_at')}")
+        return
+    since = claim.get("last_seen") or claim.get("claimed_at")
+    age = gdrive.claim_age_hours(claim)
+    stale = age is not None and age >= gdrive.CLAIM_STALE_HOURS
+    print(f"claimed by {gdrive.describe_holder(claim)} "
+          f"since {claim.get('claimed_at')} (last active {since})"
+          + (f" -- STALE, {age:.0f}h idle, takeable without --steal" if stale else ""))
 
 
 def cmd_review_auth(args):
@@ -931,6 +996,47 @@ def cmd_doctor(args):
         sys.exit(1)
 
 
+# Project-scoped commands that must NOT take a claim: read-only inspection,
+# global auth, and the claim commands themselves (they arbitrate explicitly).
+# Everything else claims, so a command added later is protected by default.
+NO_AUTO_CLAIM = {
+    ("doctor",), ("preflight",), ("mode", "show"),
+    ("drive", "auth"), ("drive", "pull"), ("drive", "push"),
+    ("drive", "claim"), ("drive", "release"), ("drive", "status"),
+    ("review", "auth"), ("publish", "auth"),
+}
+
+
+def _auto_claim(args) -> None:
+    """Take or refresh the project claim before any command that changes state.
+
+    This is what makes the lock real rather than a convention: two operators
+    starting the same project used to double-spend the TTS budget and fork the
+    Frame.io version stack in silence, and avoiding that depended on everyone
+    remembering to run `drive claim` first. Now it's a chokepoint.
+
+    Mount mode only. In gdrive mode the project isn't even on disk until
+    `drive pull`, which claims there -- and claiming per-command would mean a
+    Drive round-trip before every stage.
+    """
+    key = tuple(x for x in (getattr(args, "group", None), getattr(args, "cmd", None)) if x)
+    project_id = getattr(args, "project_id", None)
+    if key in NO_AUTO_CLAIM or not project_id or getattr(args, "no_claim", False):
+        return
+    if get_config().storage != "mount":
+        return
+    try:
+        project_dir = paths.resolve_project_dir(project_id)
+    except paths.ProjectNotFoundError:
+        return  # let the command report the real problem
+    try:
+        verdict = shared_state.claim(project_dir)
+    except shared_state.ClaimError as e:
+        sys.exit(f"refusing to run: {e}")
+    if verdict != "mine":
+        _print_claim_verdict(verdict)
+
+
 def main():
     p = argparse.ArgumentParser(prog="cn_pipeline")
     sub = p.add_subparsers(dest="group", required=True)
@@ -945,6 +1051,9 @@ def main():
         sub_p.add_argument("--version", default="",
                            help="revision suffix for deliverables (e.g. v2), so a review "
                                 "re-cut writes {id}_cndub_v2.mp4 without overwriting v1")
+        sub_p.add_argument("--no-claim", action="store_true", dest="no_claim",
+                           help="skip the project claim (read-only look at a project "
+                                "someone else is actively working on)")
         sub_p.set_defaults(func=fn)
         return sub_p
 
@@ -1019,8 +1128,6 @@ def main():
     drive_pull.add_argument("--steal", action="store_true",
                             help="take over another operator's claim (coordinate first -- "
                                  "two concurrent operators double the paid TTS spend)")
-    drive_pull.add_argument("--no-claim", action="store_true", dest="no_claim",
-                            help="pull without claiming (read-only look at a project)")
     drive_push = add(drive_group, "push", cmd_drive_push)
     drive_push.add_argument("--release", action="store_true",
                             help="release the project claim after pushing (hand-off done)")
@@ -1054,6 +1161,7 @@ def main():
 
     args = p.parse_args()
     try:
+        _auto_claim(args)
         args.func(args)
     except ConfigError as e:
         sys.exit(f"Config error: {e}")

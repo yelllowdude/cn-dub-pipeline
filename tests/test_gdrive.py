@@ -5,11 +5,14 @@ the DriveClient/API surface is exercised against the live account per
 docs/VALIDATE.md, not here.
 """
 
+import calendar
+import time
+
 import _bootstrap
 _bootstrap.install()
 
-from cn_pipeline.gdrive import (ClaimError, claim_verdict, make_claim,
-                                pick_master, scratch_syncable)
+from cn_pipeline.gdrive import (ClaimError, claim_verdict, make_claim,  # noqa: E402
+                                pick_master, scratch_syncable, touch_claim)
 
 FOLDER_MIME = "application/vnd.google-apps.folder"
 
@@ -50,8 +53,10 @@ def test_scratch_filter_keeps_paid_and_state_drops_regenerable():
 
 
 ME = {"operator": "alice", "host": "alices-mac"}
-OTHER = {"claimed": True, "operator": "bob", "host": "bobs-mac",
-         "claimed_at": "2026-07-01T00:00:00Z"}
+# An ACTIVE claim by someone else. It has to carry a live heartbeat: a claim
+# whose last_seen is a month old is abandoned, and abandoned claims are
+# takeable (see the staleness tests below).
+OTHER = dict(make_claim({"operator": "bob", "host": "bobs-mac"}))
 
 
 def test_claim_fresh_when_absent_or_released():
@@ -85,6 +90,56 @@ def test_claim_refuses_other_operator_unless_steal():
 def test_make_claim_shape():
     c = make_claim(ME)
     assert c["claimed"] is True and c["operator"] == "alice" and c["claimed_at"]
+    assert c["last_seen"], "a claim needs a heartbeat or it can never go stale"
+
+
+# --- staleness: a crashed run must not lock a project forever -------------------
+
+def test_abandoned_claim_is_takeable_without_steal():
+    stale = dict(OTHER, last_seen="2026-07-01T00:00:00Z")
+    now = calendar.timegm(time.strptime("2026-07-28T00:00:00Z", "%Y-%m-%dT%H:%M:%SZ"))
+    assert claim_verdict(stale, ME, steal=False, now_epoch=now) == "stale"
+
+
+def test_claim_just_under_the_threshold_still_refuses():
+    """The boundary matters: a colleague mid-render must not be evicted."""
+    base = calendar.timegm(time.strptime("2026-07-28T00:00:00Z", "%Y-%m-%dT%H:%M:%SZ"))
+    fresh_enough = dict(OTHER, last_seen="2026-07-27T12:30:00Z")  # 11.5h
+    try:
+        claim_verdict(fresh_enough, ME, steal=False, now_epoch=base)
+        raise AssertionError("expected ClaimError 30min before the stale threshold")
+    except ClaimError:
+        pass
+
+
+def test_heartbeat_keeps_a_long_run_alive():
+    """claimed_at ages but last_seen doesn't: a 20-hour render stays claimed."""
+    old = {"claimed": True, "operator": "bob", "host": "bobs-mac",
+           "claimed_at": "2026-07-27T00:00:00Z", "last_seen": "2026-07-27T23:00:00Z"}
+    now = calendar.timegm(time.strptime("2026-07-28T00:00:00Z", "%Y-%m-%dT%H:%M:%SZ"))
+    try:
+        claim_verdict(old, ME, steal=False, now_epoch=now)
+        raise AssertionError("expected ClaimError -- holder was active an hour ago")
+    except ClaimError:
+        pass
+
+
+def test_touch_preserves_claimed_at_and_owner():
+    c = make_claim(ME)
+    t = touch_claim(dict(c, claimed_at="2026-07-01T00:00:00Z"), ME)
+    assert t["claimed_at"] == "2026-07-01T00:00:00Z"
+    assert t["operator"] == "alice" and t["claimed"] is True
+
+
+def test_undated_claim_is_never_silently_stolen():
+    """A claim with no parsable timestamp has unknown age -- refuse, don't
+    assume it's abandoned."""
+    undated = {"claimed": True, "operator": "bob", "host": "bobs-mac"}
+    try:
+        claim_verdict(undated, ME, steal=False)
+        raise AssertionError("expected ClaimError for an undated claim")
+    except ClaimError:
+        pass
 
 
 if __name__ == "__main__":

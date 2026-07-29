@@ -10,8 +10,10 @@ ffmpeg commands in-session) -- written fresh here from the exact invocation
 used and verified against 100-body-squats_2026-04-11 (output durations
 matched the source to within ~0.02s).
 
-Requires ffmpeg-full (libass for subtitle burn-in, videotoolbox for hardware
-encoding on Apple Silicon) -- see cn_pipeline.config.
+Requires an ffmpeg with libass (subtitle burn-in silently no-ops without it)
+and an H.264 encoder -- see cn_pipeline.config. The encoder is chosen per
+machine by video_encoder_args(): h264_videotoolbox where it exists (hardware,
+Apple Silicon), libx264 otherwise, so this runs off macOS too.
 """
 
 import subprocess
@@ -95,12 +97,51 @@ def _run(cmd: list[str], log_path: Path) -> None:
         raise RuntimeError(f"ffmpeg failed (see {log_path}): {' '.join(cmd)}")
 
 
+_encoder_cache: dict[str, list[str]] = {}
+
+
+def video_encoder_args(ffmpeg_path: str) -> list[str]:
+    """H.264 encoder flags for this machine.
+
+    h264_videotoolbox is macOS-only. Hardcoding it meant a Linux or Windows
+    teammate could not render at all -- the pipeline was silently
+    single-platform. Prefer the hardware encoder where it exists (it's several
+    times faster on Apple Silicon, and these are 4K masters), fall back to
+    libx264 everywhere else.
+
+    The two aren't bit-identical, but they're deliberately matched for
+    perceptual quality rather than bitrate: videotoolbox is bitrate-driven
+    (20M), libx264 is quality-driven (CRF 18 is visually transparent for this
+    material). Duration and timing -- the things `render verify` and the anchor
+    checks care about -- are unaffected by the choice.
+    """
+    if ffmpeg_path in _encoder_cache:
+        return _encoder_cache[ffmpeg_path]
+    try:
+        enc = subprocess.run([ffmpeg_path, "-hide_banner", "-encoders"],
+                             capture_output=True, text=True, timeout=15).stdout
+    except (subprocess.TimeoutExpired, OSError):
+        enc = ""
+    if "h264_videotoolbox" in enc:
+        args = ["-c:v", "h264_videotoolbox", "-b:v", "20M"]
+    elif "libx264" in enc:
+        args = ["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p"]
+    else:
+        raise RuntimeError(
+            f"{ffmpeg_path} has neither h264_videotoolbox nor libx264, so it cannot "
+            "encode H.264. Install an ffmpeg with libx264 (most distro builds have it; "
+            "on macOS `brew install ffmpeg-full`). Run `cn-pipeline doctor` to confirm."
+        )
+    _encoder_cache[ffmpeg_path] = args
+    return args
+
+
 def render_ensub(master_video: Path, bilingual_ensub_srt: Path, out_path: Path, log_path: Path) -> Path:
     cfg = get_config()
     cmd = [
         cfg.ffmpeg_path, "-y", "-i", str(master_video),
         "-vf", f"subtitles={bilingual_ensub_srt}:force_style='{SUBTITLE_STYLE}'",
-        "-c:v", "h264_videotoolbox", "-b:v", "20M", "-c:a", "copy",
+        *video_encoder_args(cfg.ffmpeg_path), "-c:a", "copy",
         str(out_path),
     ]
     _run(cmd, log_path)
@@ -131,7 +172,7 @@ def render_cndub(master_video: Path, zh_vo_wav: Path, bilingual_cndub_srt: Path,
         cfg.ffmpeg_path, "-y", "-i", str(master_video), "-i", str(zh_vo_wav),
         "-map", "0:v", "-map", "1:a",
         "-vf", f"subtitles={ass}",
-        "-c:v", "h264_videotoolbox", "-b:v", "20M", "-c:a", "aac", "-b:a", "192k", "-shortest",
+        *video_encoder_args(cfg.ffmpeg_path), "-c:a", "aac", "-b:a", "192k", "-shortest",
         str(out_path),
     ]
     _run(cmd, log_path)
