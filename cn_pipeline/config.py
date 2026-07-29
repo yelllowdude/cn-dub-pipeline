@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -23,6 +24,50 @@ CONFIG_PATH = DATA_ROOT / "config.json"
 ENV_PATH = DATA_ROOT / ".env"
 
 FFMPEG_FULL_DEFAULT = "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg"
+
+# Settings that change the deliverable (or the spend policy) live in the repo,
+# not in each operator's config.json -- otherwise the same input renders
+# differently depending on whose laptop ran it. Observed in practice:
+# me_gain_db was -4.0 here and 2.0 on one machine, i.e. the M&E bed was mixed
+# 6 dB louder on that operator's videos than anyone else's, silently.
+# config.json can still override these (nothing is forced), but `doctor`
+# reports every override so the drift is visible.
+DEFAULTS_PATH = REPO_ROOT / "pipeline_defaults.json"
+
+# Keys read from DEFAULTS_PATH. Anything not listed here is machine-local
+# (paths, storage mode, credentials, operator label) and belongs in config.json.
+OUTPUT_SETTING_KEYS = (
+    "whisper_model",
+    "me_gain_db",
+    "max_tts_calls_per_run",
+    "max_kie_calls_per_run",
+    "max_screentext_clean_calls_per_run",
+    "screentext_enabled",
+)
+
+
+def load_output_defaults() -> dict:
+    """Repo-versioned defaults for output-affecting settings. Missing or
+    unparseable file is not fatal -- the hardcoded fallbacks below still
+    apply, so an older checkout keeps working."""
+    if not DEFAULTS_PATH.exists():
+        return {}
+    try:
+        raw = json.loads(DEFAULTS_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return {k: v for k, v in raw.items() if k in OUTPUT_SETTING_KEYS}
+
+
+def output_setting_overrides(raw_config: dict) -> list[tuple[str, object, object]]:
+    """(key, repo_default, local_value) for every output setting this machine
+    overrides. Used by `doctor` to surface silent divergence between operators."""
+    defaults = load_output_defaults()
+    out = []
+    for key in OUTPUT_SETTING_KEYS:
+        if key in raw_config and key in defaults and raw_config[key] != defaults[key]:
+            out.append((key, defaults[key], raw_config[key]))
+    return out
 
 
 class ConfigError(RuntimeError):
@@ -68,7 +113,13 @@ def _load_config() -> dict:
 def save_env_var(key: str, value: str) -> Path:
     """Persist KEY=value into the data-dir .env, replacing any existing line.
     Used by the one-time auth flows (Frame.io, YouTube) to store refresh tokens
-    so later runs authenticate unattended."""
+    so later runs authenticate unattended.
+
+    Writes to a temp file in the same directory and os.replace()s it over the
+    target, so the .env is never observed half-written. The previous in-place
+    write had a window where a crash (or a second process) could leave the file
+    truncated -- and this file holds every credential on the machine, so losing
+    it means re-running every auth flow."""
     lines = ENV_PATH.read_text(encoding="utf-8").splitlines() if ENV_PATH.exists() else []
     out, found = [], False
     for ln in lines:
@@ -79,7 +130,19 @@ def save_env_var(key: str, value: str) -> Path:
             out.append(ln)
     if not found:
         out.append(f"{key}={value}")
-    ENV_PATH.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+    ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(ENV_PATH.parent), prefix=".env.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write("\n".join(out) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o600)  # credentials file; don't widen it via the temp
+        os.replace(tmp, ENV_PATH)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
     return ENV_PATH
 
 
@@ -192,23 +255,30 @@ class Config:
                     "(see README step on Drive setup)."
                 )
 
-        self.whisper_model = raw.get("whisper_model", "small")
+        # Output-affecting settings: repo defaults first, config.json may
+        # override (and `doctor` will say so). See OUTPUT_SETTING_KEYS.
+        d = load_output_defaults()
+
+        def setting(key, fallback):
+            return raw.get(key, d.get(key, fallback))
+
+        self.whisper_model = setting("whisper_model", "small")
         self.ffmpeg_path = self._resolve_ffmpeg(raw.get("ffmpeg_path"))
 
         # Gain (dB) applied to the music/effects bed when `dub mix-me` lays it
         # under the Chinese VO. Tunable in config.json without a code change;
         # +6 dB is ~2x louder. Default -4 keeps it under the voice.
-        self.me_gain_db = float(raw.get("me_gain_db", -4.0))
+        self.me_gain_db = float(setting("me_gain_db", -4.0))
 
         # Per-run paid-call caps (see cn_pipeline.spend). Defaults are sized
         # so a normal run never notices them: ~10-15 TTS chunks + re-split
         # sub-chunks, and exactly 1 KIE thumbnail clean per video.
-        self.max_tts_calls_per_run = int(raw.get("max_tts_calls_per_run", 60))
-        self.max_kie_calls_per_run = int(raw.get("max_kie_calls_per_run", 5))
+        self.max_tts_calls_per_run = int(setting("max_tts_calls_per_run", 60))
+        self.max_kie_calls_per_run = int(setting("max_kie_calls_per_run", 5))
         # In-screen text localization cleans one region per detected text event,
         # so it needs its own (larger) budget separate from the thumbnail's
         # single clean -- a busy video can have dozens of on-screen labels.
-        self.max_screentext_clean_calls_per_run = int(raw.get("max_screentext_clean_calls_per_run", 40))
+        self.max_screentext_clean_calls_per_run = int(setting("max_screentext_clean_calls_per_run", 40))
 
         # In-screen text localization is EXPERIMENTAL and off by default. Flip
         # to true in config.json to try it. When false, `screentext` commands
@@ -217,7 +287,7 @@ class Config:
         # (To remove it wholesale: delete cn_pipeline/screentext.py, drop the
         # `screentext` group in cli.py, and revert paths.effective_master to
         # find_master_video. Nothing else depends on it.)
-        self.screentext_enabled = bool(raw.get("screentext_enabled", False))
+        self.screentext_enabled = bool(setting("screentext_enabled", False))
 
     def _resolve_ffmpeg(self, override: str | None) -> str:
         """Find a libass-capable ffmpeg. Probes, in order: the config override,

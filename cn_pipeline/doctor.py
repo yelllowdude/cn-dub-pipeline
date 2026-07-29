@@ -121,6 +121,31 @@ def check_config_file() -> list[Check]:
     return out
 
 
+def check_output_settings() -> list[Check]:
+    """Report output-affecting settings this machine overrides.
+
+    These change the deliverable, so an override means the same input renders
+    differently here than on a teammate's machine. Not a FAIL -- an override
+    can be deliberate -- but it must be visible, because the failure mode is
+    silent: nobody notices the M&E bed is 6 dB hotter until a reviewer does.
+    """
+    from cn_pipeline.config import CONFIG_PATH, output_setting_overrides
+    if not Path(CONFIG_PATH).exists():
+        return []
+    try:
+        raw = json.loads(Path(CONFIG_PATH).read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    overrides = output_setting_overrides(raw)
+    if not overrides:
+        return [_c("output settings", PASS, "match pipeline_defaults.json")]
+    return [_c("output settings", WARN,
+               "; ".join(f"{k}: repo {dflt!r} -> local {loc!r}" for k, dflt, loc in overrides),
+               "these change the rendered output -- teammates will produce different "
+               "files from the same input. Remove from config.json to match the team, "
+               "or change pipeline_defaults.json so everyone moves together")]
+
+
 def check_ffmpeg() -> list[Check]:
     """ffmpeg must have libass (or subtitle burn-in silently no-ops). The
     encoder check is a WARN not a FAIL: h264_videotoolbox is macOS-only, so a
@@ -341,6 +366,7 @@ def run(project_id: str | None = None) -> list[Check]:
     checks: list[Check] = []
     checks += check_env_file()
     checks += check_config_file()
+    checks += check_output_settings()
     checks += check_ffmpeg()
     checks += check_python_deps()
 
