@@ -41,6 +41,7 @@ for both; only the consenting ACCOUNT differs).
 import calendar
 import getpass
 import hashlib
+import ipaddress
 import json
 import socket
 import time
@@ -177,10 +178,14 @@ def make_claim(me: dict) -> dict:
 
 
 def describe_holder(claim: dict) -> str:
-    """Who to go talk to. `host` is an opaque machine id, so show the hostname
-    when the claim carries one."""
+    """Who to go talk to.
+
+    Only ever the operator plus a readable hostname. `host` is deliberately not
+    a fallback: it's an opaque machine id, and "producer@286e535a54b8" tells a
+    teammate strictly less than "producer" while looking like it means
+    something."""
     who = claim.get("operator") or "someone"
-    where = claim.get("hostname") or claim.get("host") or ""
+    where = claim.get("hostname") or ""
     return f"{who}@{where}" if where else who
 
 
@@ -224,13 +229,28 @@ def machine_id() -> str:
     return new_id
 
 
+def _display_hostname() -> str:
+    """A hostname worth showing a teammate, or "" if there isn't one.
+
+    On a stock macOS gethostname() can return the current DHCP address. An IP
+    identifies nobody, changes on its own, and is mild noise to leave sitting in
+    a file on the shared Drive -- so drop it and let the operator label carry
+    the message."""
+    name = socket.gethostname()
+    try:
+        ipaddress.ip_address(name.rstrip("."))
+        return ""
+    except ValueError:
+        return name
+
+
 def whoami(cfg=None) -> dict:
     operator = ""
     if cfg is not None:
         operator = getattr(cfg, "operator", "") or ""
     return {"operator": operator or getpass.getuser(),
             "host": machine_id(),
-            "hostname": socket.gethostname()}
+            "hostname": _display_hostname()}
 
 
 def _file_md5(path: Path, cache: dict) -> str:

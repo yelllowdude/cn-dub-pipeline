@@ -48,6 +48,21 @@ __all__ = ["ClaimError", "claim", "release", "status", "heartbeat",
            "sync_scratch_out", "sync_scratch_in", "pipeline_dir", "claim_path"]
 
 
+def _me() -> dict:
+    """Identity for a claim, including the configured `operator` label.
+
+    whoami() only reads that label off a Config, so calling it bare silently
+    fell back to the unix login name and the configured label had no effect on
+    any mount-mode claim. Config is unavailable in a few paths (a half-set-up
+    machine), and a missing label must never stop a claim -- fall back then.
+    """
+    from cn_pipeline.config import get_config
+    try:
+        return whoami(get_config())
+    except Exception:
+        return whoami()
+
+
 def pipeline_dir(project_dir: Path) -> Path:
     return Path(project_dir) / "CN" / PIPELINE_DIRNAME
 
@@ -98,7 +113,7 @@ def status(project_dir: Path) -> dict | None:
 def claim(project_dir: Path, me: dict | None = None, steal: bool = False) -> str:
     """Take (or refresh) the claim. Returns 'fresh'|'mine'|'stolen'|'stale';
     raises ClaimError when someone else is actively holding it."""
-    me = me or whoami()
+    me = me or _me()
     existing = _read_claim(project_dir)
     verdict = claim_verdict(existing, me, steal)
     data = touch_claim(existing, me) if verdict == "mine" else make_claim(me)
@@ -110,7 +125,7 @@ def heartbeat(project_dir: Path, me: dict | None = None) -> None:
     """Refresh last_seen if we hold the claim. Never raises and never takes a
     claim it doesn't already have -- this runs on ordinary commands, and a
     read-only `mode show` should not be able to steal anything."""
-    me = me or whoami()
+    me = me or _me()
     existing = _read_claim(project_dir)
     if not existing or not existing.get("claimed"):
         return
@@ -126,7 +141,7 @@ def release(project_dir: Path, me: dict | None = None) -> None:
     """Hand the project back. Writes claimed=false rather than deleting, so the
     record of who had it last survives (and mount mode matches gdrive mode,
     which avoids deletes to stay off Drive delete permission)."""
-    me = me or whoami()
+    me = me or _me()
     _write_json_atomic(claim_path(project_dir), {
         "claimed": False, "operator": me["operator"], "host": me["host"],
         "hostname": me.get("hostname", ""), "released_at": _iso_now(),

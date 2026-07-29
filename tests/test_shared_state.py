@@ -209,5 +209,77 @@ def test_sync_in_on_a_project_nobody_has_shared_yet():
         assert shared_state.sync_scratch_in(Path(td) / "runs" / "proj-a", proj) == []
 
 
+# --- identity carries the configured label ---------------------------------------
+
+def test_claim_uses_the_configured_operator_label():
+    """Regression: shared_state called whoami() with no Config, so the operator
+    label in config.json was silently ignored and every mount-mode claim was
+    labelled with the unix login name instead."""
+    from cn_pipeline import config as cfgmod
+
+    class Cfg:
+        operator = "producer"
+
+    with tempfile.TemporaryDirectory() as td:
+        proj = _project(td)
+        real = cfgmod.get_config
+        cfgmod.get_config = lambda: Cfg()
+        try:
+            shared_state.claim(proj)          # no explicit `me`
+        finally:
+            cfgmod.get_config = real
+        assert shared_state.status(proj)["operator"] == "producer"
+
+
+def test_claim_still_works_when_config_is_unavailable():
+    """A half-set-up machine must still be able to claim."""
+    from cn_pipeline import config as cfgmod
+
+    def boom():
+        raise RuntimeError("no config.json")
+
+    with tempfile.TemporaryDirectory() as td:
+        proj = _project(td)
+        real = cfgmod.get_config
+        cfgmod.get_config = boom
+        try:
+            assert shared_state.claim(proj) == "fresh"
+        finally:
+            cfgmod.get_config = real
+        assert shared_state.status(proj)["operator"]        # fell back to a login name
+
+
+def test_an_ip_is_not_stored_as_a_hostname():
+    from cn_pipeline import gdrive
+    real = gdrive.socket.gethostname
+    gdrive.socket.gethostname = lambda: "192.168.1.84"
+    try:
+        assert gdrive.whoami()["hostname"] == ""
+        gdrive.socket.gethostname = lambda: "studio-mac"
+        assert gdrive.whoami()["hostname"] == "studio-mac"
+    finally:
+        gdrive.socket.gethostname = real
+
+
+def test_holder_description_never_shows_the_opaque_machine_id():
+    """"producer@286e535a54b8" says less than "producer" while looking like it
+    means something. host must not be a display fallback."""
+    from cn_pipeline.gdrive import describe_holder
+    assert describe_holder(
+        {"operator": "producer", "hostname": "", "host": "286e535a54b8"}) == "producer"
+    assert describe_holder(
+        {"operator": "producer", "hostname": "studio-mac", "host": "286e535a54b8"}
+    ) == "producer@studio-mac"
+    # a real claim, built the real way, must also stay readable
+    from cn_pipeline import gdrive
+    real = gdrive.socket.gethostname
+    gdrive.socket.gethostname = lambda: "10.0.0.7"
+    try:
+        c = gdrive.make_claim(gdrive.whoami())
+    finally:
+        gdrive.socket.gethostname = real
+    assert "@" not in describe_holder(c), describe_holder(c)
+
+
 if __name__ == "__main__":
     _bootstrap.run_module(dict(globals()))
