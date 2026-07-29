@@ -160,5 +160,71 @@ def test_unrelated_wavs_are_not_treated_as_beds():
         assert not paths.me_wav_path(d).exists()
 
 
+# --- master: filed in a delivery subfolder instead of the root ----------------------
+# Real folders: `leg-gain-3-mistakes_2025-02-17/video/leg-gain-3-mistakes_2025-02-17.mp4`
+# and `cardio-cali-gains-jump-ropes_2025-02-04/longform/video.mov`.
+
+def test_master_in_a_video_subfolder_is_found():
+    with tempfile.TemporaryDirectory() as td:
+        d = _proj(td, "leg-gain_2025-02-17", ["video/leg-gain_2025-02-17.mp4"])
+        found = paths.find_master_video(d)
+        assert found.name == "leg-gain_2025-02-17.mp4"
+        assert found.parent.name == "video"
+
+
+def test_unprefixed_master_in_a_longform_subfolder_is_found():
+    with tempfile.TemporaryDirectory() as td:
+        d = _proj(td, "cardio_2025-02-04", ["longform/video.mov"])
+        assert paths.find_master_video(d).name == "video.mov"
+
+
+def test_root_master_beats_a_subfolder_one():
+    """The root is authoritative; subfolders are a fallback, not a merge."""
+    with tempfile.TemporaryDirectory() as td:
+        d = _proj(td, "proj_2025-01-01",
+                  ["proj_2025-01-01_video.mp4", "video/old_cut.mov"])
+        assert paths.find_master_video(d).name == "proj_2025-01-01_video.mp4"
+
+
+def test_staging_broll_is_never_adopted_as_the_master():
+    """`staging/` holds screen recordings and source clips. With the real master
+    in longform/, the staging clip must not even be a candidate."""
+    with tempfile.TemporaryDirectory() as td:
+        d = _proj(td, "cardio_2025-02-04",
+                  ["longform/video.mov", "staging/crossrope-app-screen-record.MP4"])
+        assert paths.find_master_video(d).name == "video.mov"
+
+
+def test_broll_only_project_still_reports_no_master():
+    """No delivery subfolder at all -> unchanged loud failure, not a b-roll clip."""
+    with tempfile.TemporaryDirectory() as td:
+        d = _proj(td, "proj_2025-01-01",
+                  ["staging/clip.mp4", "multi-images/anim.mov"])
+        try:
+            paths.find_master_video(d)
+        except ProjectNotFoundError as e:
+            assert "No master video" in str(e)
+        else:
+            raise AssertionError("a staging clip was adopted as the master")
+
+
+def test_ambiguous_subfolder_masters_raise_with_the_list():
+    with tempfile.TemporaryDirectory() as td:
+        d = _proj(td, "proj_2025-01-01", ["video/cut_a.mov", "video/cut_b.mov"])
+        try:
+            paths.find_master_video(d)
+        except ProjectNotFoundError as e:
+            assert "cut_a.mov" in str(e) and "cut_b.mov" in str(e)
+        else:
+            raise AssertionError("two non-conforming cuts must not be guessed between")
+
+
+def test_rendered_output_in_a_subfolder_is_excluded():
+    with tempfile.TemporaryDirectory() as td:
+        d = _proj(td, "proj_2025-01-01",
+                  ["video/proj_2025-01-01.mp4", "video/proj_2025-01-01_cndub.mp4"])
+        assert paths.find_master_video(d).name == "proj_2025-01-01.mp4"
+
+
 if __name__ == "__main__":
     _bootstrap.run_module(dict(globals()))

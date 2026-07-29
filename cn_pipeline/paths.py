@@ -52,16 +52,40 @@ MASTER_EXTS = (".mp4", ".mov")
 # rendered output must never be mistaken for the source master on a re-run.
 _OUTPUT_MARKERS = ("_cndub", "_ensub", "_master", "_zh_vo", "_proxy")
 
+# Subfolders editors file the finished program under when they don't leave it in
+# the root: `video/`, `longform/`. Consulted ONLY when the root holds no
+# candidate at all, and deliberately an allowlist rather than "any subfolder" --
+# the same projects also carry `staging/`, `multi-images/` and `Thumbnails/` full
+# of b-roll, screen recordings and source clips. Adopting one of those as the
+# master would be silent and wrong, so an unrecognized layout keeps failing
+# loudly instead of guessing.
+_DELIVERY_SUBDIRS = ("video", "videos", "longform", "final", "export", "exports",
+                     "master", "masters")
 
-def _root_videos(project_dir: Path) -> list[Path]:
-    """Every plausible master sitting directly in the project root."""
+
+def _videos_in(directory: Path) -> list[Path]:
+    """Every plausible master sitting directly in `directory`."""
     out = []
-    for p in sorted(project_dir.iterdir()):
+    for p in sorted(directory.iterdir()):
         if not p.is_file() or p.suffix.lower() not in MASTER_EXTS:
             continue
         if any(m in p.stem for m in _OUTPUT_MARKERS):
             continue
         out.append(p)
+    return out
+
+
+def _root_videos(project_dir: Path) -> list[Path]:
+    """Every plausible master sitting directly in the project root."""
+    return _videos_in(project_dir)
+
+
+def _delivery_subdir_videos(project_dir: Path) -> list[Path]:
+    """Plausible masters one level down, in a recognized delivery subfolder."""
+    out = []
+    for d in sorted(project_dir.iterdir()):
+        if d.is_dir() and d.name.lower() in _DELIVERY_SUBDIRS:
+            out.extend(_videos_in(d))
     return out
 
 
@@ -80,11 +104,21 @@ def find_master_video(project_dir: Path) -> Path:
     ONE video, that's unambiguously the master. Several non-conforming
     candidates is a genuine ambiguity a human must settle, and it errors with
     the list rather than guessing.
+
+    Editors also file the program in a subfolder rather than the root
+    (`video/{id}.mp4`, `longform/video.mov`). When the root holds nothing, a
+    recognized delivery subfolder is searched too -- see _DELIVERY_SUBDIRS for
+    why that's an allowlist and not a walk.
     """
     videos = _root_videos(project_dir)
+    searched = str(project_dir)
+    if not videos:
+        videos = _delivery_subdir_videos(project_dir)
+        searched = (f"{project_dir} or its "
+                    f"{'/'.join(_DELIVERY_SUBDIRS[:3])}/... subfolders")
     if not videos:
         raise ProjectNotFoundError(
-            f"No master video ({' or '.join(MASTER_EXTS)}) found directly in {project_dir}")
+            f"No master video ({' or '.join(MASTER_EXTS)}) found in {searched}")
 
     prefixed = [p for p in videos if p.name.startswith(project_dir.name)]
     pool = prefixed or videos
@@ -95,7 +129,7 @@ def find_master_video(project_dir: Path) -> Path:
             pool = sorted(pool, key=lambda p: p.stat().st_mtime)
         else:
             raise ProjectNotFoundError(
-                f"Several candidate masters in {project_dir} and none matches the "
+                f"Several candidate masters in {searched} and none matches the "
                 f"project id, so which one is the master is a judgment call: "
                 + ", ".join(p.name for p in pool)
                 + f". Rename the real one to start with '{project_dir.name}'."
