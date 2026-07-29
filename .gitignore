@@ -16,3 +16,6 @@ runs/
 *.log
 mirror/
 .gdrive_meta.json
+# Per-machine identity for the project claim lock. Committing it would make
+# every clone claim as the same machine, which defeats the lock.
+.machine_id
