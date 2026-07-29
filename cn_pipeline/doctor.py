@@ -118,6 +118,18 @@ def check_config_file() -> list[Check]:
                           "is Google Drive Desktop running and the Shared Drive synced?"))
         else:
             out.append(_c("drive_root", PASS, str(root)))
+
+    # The claim lock labels itself with this. Without it the label is the unix
+    # username, which is fine for the lock (re-entrancy keys on a machine id)
+    # but leaves a teammate reading "claimed by wenghuifoong" and guessing who
+    # to go ask.
+    if raw.get("operator"):
+        out.append(_c("operator label", PASS, raw["operator"]))
+    else:
+        import getpass
+        out.append(_c("operator label", WARN, f"unset -- claims will say '{getpass.getuser()}'",
+                      'add "operator": "<your name>" to config.json so claim messages '
+                      "name a person your teammates recognise"))
     return out
 
 
@@ -312,6 +324,36 @@ def estimate_tts_characters(project_id: str) -> dict:
             "billable_chars": billable, "pending": pending}
 
 
+def check_claim(project_dir) -> list[Check]:
+    """Who, if anyone, is working this project right now.
+
+    Answers the question doctor exists for -- "is it safe to start?" -- before
+    the operator spends an hour of Whisper and a TTS budget discovering that a
+    colleague is mid-run on the same video."""
+    from cn_pipeline import gdrive, shared_state
+    try:
+        claim = shared_state.status(project_dir)
+    except OSError as e:
+        return [_c("project claim", WARN, f"unreadable: {e}")]
+    if not claim or not claim.get("claimed"):
+        return [_c("project claim", PASS, "unclaimed")]
+
+    me = gdrive.whoami()
+    holder = gdrive.describe_holder(claim)
+    if claim.get("operator") == me["operator"] and claim.get("host") == me["host"]:
+        return [_c("project claim", PASS, f"held by you since {claim.get('claimed_at')}")]
+
+    age = gdrive.claim_age_hours(claim)
+    if age is not None and age >= gdrive.CLAIM_STALE_HOURS:
+        return [_c("project claim", WARN,
+                   f"{holder}, idle {age:.0f}h (stale)",
+                   "stale claims are taken over automatically -- but check they really "
+                   "stopped before you start")]
+    return [_c("project claim", FAIL, f"held by {holder}",
+               "they are working this project now. Coordinate before starting, or you "
+               "will both pay for the same TTS and fork the Frame.io review stack.")]
+
+
 def check_project(project_id: str, el_remaining: int | None) -> list[Check]:
     from cn_pipeline import paths
     out = []
@@ -328,6 +370,8 @@ def check_project(project_id: str, el_remaining: int | None) -> list[Check]:
         out.append(_c("master video", FAIL, str(e)[:200],
                      "the master must sit in the project ROOT and its filename must "
                      "start with the exact project id"))
+
+    out += check_claim(project_dir)
 
     me = paths.me_wav_path(project_dir)
     if me.exists():
