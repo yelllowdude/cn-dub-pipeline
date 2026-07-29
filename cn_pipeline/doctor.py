@@ -120,16 +120,17 @@ def check_config_file() -> list[Check]:
             out.append(_c("drive_root", PASS, str(root)))
 
     # The claim lock labels itself with this. Without it the label is the unix
-    # username, which is fine for the lock (re-entrancy keys on a machine id)
-    # but leaves a teammate reading "claimed by wenghuifoong" and guessing who
-    # to go ask.
+    # username, which works for the lock (re-entrancy keys on a machine id, not
+    # this) but can leave a teammate reading a login name they don't recognise
+    # and guessing who to go ask.
     if raw.get("operator"):
         out.append(_c("operator label", PASS, raw["operator"]))
     else:
         import getpass
         out.append(_c("operator label", WARN, f"unset -- claims will say '{getpass.getuser()}'",
-                      'add "operator": "<your name>" to config.json so claim messages '
-                      "name a person your teammates recognise"))
+                      'set "operator" in config.json to whatever label your teammates '
+                      "will recognise (a handle or a role is fine) so claim messages "
+                      "point at someone reachable"))
     return out
 
 
@@ -354,6 +355,33 @@ def check_claim(project_dir) -> list[Check]:
                "will both pay for the same TTS and fork the Frame.io review stack.")]
 
 
+def check_me_gain(project_id: str, me_wav) -> list[Check]:
+    """Which M&E gain this project will mix at, and the bed's measured level.
+
+    Reported, not judged. I tried to infer provenance from the level and the
+    measurement refuted it: across real projects the Demucs-separated beds came
+    in at -31.9/-32.6/-36.5 dBFS and the staff-prepped ones at
+    -37.5/-35.4/-34.3/-32.6 -- fully overlapping, with the quietest bed of all
+    being staff-prepped. Overall dBFS mostly reflects how much near-silence a
+    track contains, not how loud its music is, so any threshold here would fire
+    on legitimate files and train people to ignore doctor. The number is shown
+    so a human can sanity-check it; the gain comes from the declared source.
+    """
+    from cn_pipeline import dub, paths
+    from cn_pipeline.cli import _me_source
+    from cn_pipeline.config import get_config
+
+    source = _me_source(paths.run_scratch_dir(project_id))
+    gain = dub.gain_for_source(get_config(), source)
+    detail = f"{me_wav.name} -- source {source}, gain {gain:+g} dB"
+    try:
+        from pydub import AudioSegment
+        detail += f" (bed {AudioSegment.from_wav(me_wav).dBFS:.0f} dBFS)"
+    except Exception:
+        pass
+    return [_c("M&E bed", PASS, detail)]
+
+
 def check_project(project_id: str, el_remaining: int | None) -> list[Check]:
     from cn_pipeline import paths
     out = []
@@ -375,7 +403,7 @@ def check_project(project_id: str, el_remaining: int | None) -> list[Check]:
 
     me = paths.me_wav_path(project_dir)
     if me.exists():
-        out.append(_c("M&E bed", PASS, me.name))
+        out += check_me_gain(project_id, me)
     else:
         out.append(_c("M&E bed", WARN, f"no {me.name}",
                      "dub mix-me will no-op and the dub ships VO-only, or generate "

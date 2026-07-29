@@ -194,7 +194,21 @@ chunks whose lines actually changed — never trust or hand-edit the files in
    cn-pipeline dub mix-me --project-id {id}
    ```
    Mixes the tightened VO with the project's `{id}_me.wav` background bed
-   (music + effects, no VO). If `{id}_me.wav` doesn't exist at the project
+   (music + effects, no VO).
+
+   **If you generated the bed yourself, say so:** `--me-source generated`. A
+   staff-prepped bed is mixed at full level and gets pulled down under the
+   voice; a Demucs-separated bed is thinner and gets a boost instead. One gain
+   can't serve both, and the wrong one either buries the bed or lets it fight
+   the dub. It's recorded in `project.json`, so pass it once — and changing it
+   re-mixes rather than skipping past a bed at the wrong level. Default is
+   `provided`, which is correct whenever staff prepped the file.
+
+   You cannot infer this from the file: measured across real projects, the
+   separated and staff-prepped beds' overall levels overlap completely. Declare
+   it from how the file was actually produced.
+
+   If `{id}_me.wav` doesn't exist at the project
    root and one should be generated (staff hasn't prepped one, but the
    source video clearly has a music/effects bed worth keeping under the
    dub), separate it from the master's full audio track with Demucs

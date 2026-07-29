@@ -37,6 +37,20 @@ def _dub_mode(scratch: Path) -> str:
     return "cue_locked"
 
 
+def _me_source(scratch: Path) -> str:
+    """Where this project's M&E bed came from, per runs/{id}/project.json.
+    Absent = "provided" (the staff-prepped norm), which is also the safe guess:
+    it attenuates rather than boosts, so a wrong assumption can't bury the
+    voice under the bed."""
+    pj = scratch / "project.json"
+    if pj.exists():
+        try:
+            return json.loads(pj.read_text(encoding="utf-8")).get("me_source", "provided")
+        except json.JSONDecodeError:
+            pass
+    return "provided"
+
+
 def _stage_gate(args, outputs: list[Path], inputs: list[Path] = ()) -> bool:
     """SKIP_OK semantics per cn_workflow.html section 04: a done stage skips,
     only --force redoes it. "Done" is make-style -- all outputs exist and none
@@ -257,11 +271,27 @@ def cmd_dub_mix_me(args):
     if not me_wav.exists():
         print(f"no {me_wav.name} found at project root -- skipping, dub ships without a background bed")
         return
+    pj = scratch / "project.json"
+    if args.me_source:
+        data = json.loads(pj.read_text(encoding="utf-8")) if pj.exists() else {}
+        data["me_source"] = args.me_source
+        pj.parent.mkdir(parents=True, exist_ok=True)
+        pj.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    me_source = _me_source(scratch)
+
     out_path = scratch / "dub_master_mixed.wav"
-    if not _stage_gate(args, [out_path], [scratch / "dub_master_padded.wav", me_wav]):
+    # project.json is an input: changing me_source changes the gain, so the mix
+    # has to redo rather than SKIP_OK past a bed at the wrong level.
+    gate_inputs = [scratch / "dub_master_padded.wav", me_wav]
+    if pj.exists():
+        gate_inputs.append(pj)
+    if not _stage_gate(args, [out_path], gate_inputs):
         return
+    cfg = get_config()
+    gain = dub.gain_for_source(cfg, me_source)
+    print(f"M&E source: {me_source} -> gain {gain:+g} dB")
     result = dub.mix_me(scratch / "dub_master_padded.wav", me_wav, out_path,
-                        me_gain_db=get_config().me_gain_db)
+                        me_gain_db=gain)
     print(json.dumps(result, indent=2))
     print(f"wrote {out_path}")
 
@@ -1148,7 +1178,14 @@ def main():
     add(dub_group, "fix", cmd_dub_fix)
     add(dub_group, "finalize", cmd_dub_finalize)
     add(dub_group, "tighten", cmd_dub_tighten)
-    add(dub_group, "mix-me", cmd_dub_mix_me)
+    dub_mix_me = add(dub_group, "mix-me", cmd_dub_mix_me)
+    dub_mix_me.add_argument("--me-source", dest="me_source", default=None,
+                            choices=list(dub.ME_SOURCES),
+                            help="where {id}_me.wav came from: provided = staff-prepped "
+                                 "(attenuated under the VO); generated = separated from "
+                                 "the master with Demucs, which comes back quieter and "
+                                 "is boosted instead. Recorded in project.json, so pass "
+                                 "it once. Defaults to provided.")
     add(dub_group, "verify-anchors", cmd_dub_verify_anchors)
 
     thumb_group = sub.add_parser("thumbnail").add_subparsers(dest="cmd", required=True)
