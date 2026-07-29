@@ -91,6 +91,20 @@ check("tiny trailing fragment joins previous", all(len(c) >= 2 for c in cues))
 check("unterminated final sentence kept", split_zh_cues("没有句号的结尾")[-1] == "没有句号的结尾")
 check("empty passage -> no cues", split_zh_cues("  ") == [])
 
+# A locked English product name can be longer than the cap ("Calisthenics
+# Playbook" is 21 chars vs a cap of 20) and the glossary forbids translating
+# it. A blind p[:ZH_MAX_CHARS] slice rendered it "Calisthenics Playboo"/"k" --
+# caught by a native reviewer on walking-is-not-exercise_2025-10-18.
+product = "想要力量路线图？Calisthenics Playbook 就是为此做的。"
+cues = split_zh_cues(product)
+check("product name never chopped mid-word", "Calisthenics Playbook" in cues)
+check("product-name split loses nothing", "".join(cues).replace(" ", "") == product.replace(" ", ""))
+check("only the Latin run may exceed the cap",
+      all(len(c) <= ZH_MAX_CHARS or c == "Calisthenics Playbook" for c in cues))
+
+cues = split_zh_cues("打好底子，让你的力量 go bananas。")
+check("short Latin run stays inline", any("go bananas" in c for c in cues))
+
 print(f"\nall {passed} checks passed")
 
 # --- build_cndub_ass with empty English lines (Chinese-only native subs) ---

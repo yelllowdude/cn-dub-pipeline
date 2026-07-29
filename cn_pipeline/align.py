@@ -50,13 +50,44 @@ def transcribe_to_srt(audio_path: Path, out_srt_path: Path, language: str = "en"
     Path(out_srt_path).write_text("\n".join(lines), encoding="utf-8")
 
 
+AUDIO_DURATION_TOLERANCE_S = 1.0
+
+
 def extract_audio_16k(video_or_audio_path: Path, out_wav_path: Path) -> None:
+    """16 kHz mono WAV for Whisper, with the extracted duration CHECKED.
+
+    ffmpeg exits 0 after a short read. On a Google Drive for Desktop mount the
+    master is streamed on demand, so a not-yet-materialized file yields however
+    many bytes are cached and the WAV just ends early -- silently. Observed on a
+    real batch: four of five videos extracted short, one of them 181s of a 674s
+    master, and everything downstream looked healthy. Whisper transcribed what
+    it was given, the anchors covered only that span, and the dub would have run
+    out a quarter of the way through the video with nothing anywhere saying so.
+
+    A truncated extract is unrecoverable further down the pipeline (there is no
+    later stage that knows what the audio *should* have been), so it has to fail
+    here.
+    """
     cfg = get_config()
     subprocess.run(
         [cfg.ffmpeg_path, "-y", "-i", str(video_or_audio_path), "-vn", "-ac", "1", "-ar", "16000", str(out_wav_path)],
         capture_output=True,
         check=True,
     )
+
+    from cn_pipeline.render import probe_duration_ms
+    src_s = probe_duration_ms(cfg.ffmpeg_path, video_or_audio_path) / 1000
+    got_s = probe_duration_ms(cfg.ffmpeg_path, out_wav_path) / 1000
+    if src_s - got_s > AUDIO_DURATION_TOLERANCE_S:
+        raise RuntimeError(
+            f"extracted audio is {got_s:.1f}s but {video_or_audio_path.name} is "
+            f"{src_s:.1f}s -- {src_s - got_s:.1f}s short.\n"
+            "ffmpeg reported success, so this is almost certainly a partially "
+            "cached file on a Drive for Desktop mount rather than a corrupt "
+            "master. Force it local and retry:\n"
+            f"    cat '{video_or_audio_path}' > /dev/null\n"
+            "    cn-pipeline align extract-audio --project-id <id> --force"
+        )
 
 
 def force_align_chunk(
