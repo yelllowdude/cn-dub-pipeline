@@ -4,6 +4,6 @@
   "description": "Chinese localization pipeline for Gravgear/Yellow Dude YouTube videos -- transcribe, translate, dub, align, render, thumbnail, then file the Notion row. Translation, title pick, and thumbnail wording stay live judgment calls, never auto-scripted.",
   "version": "1.0.0",
   "author": {
-    "name": "Wayne Foong"
+    "name": "Gravgear"
   }
 }

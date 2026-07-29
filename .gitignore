@@ -19,3 +19,6 @@ mirror/
 # Per-machine identity for the project claim lock. Committing it would make
 # every clone claim as the same machine, which defeats the lock.
 .machine_id
+# `team export` output -- live API keys and a refresh token. Belongs in the
+# team password vault, never in git.
+cn-pipeline-team-credentials*.json

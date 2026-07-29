@@ -149,25 +149,37 @@ signed into the Gravgear team.
    plugin files, so a plugin update never wipes them). It prints the exact
    path. The starter `config.json` is preset to gdrive storage mode; there
    is no per-person path to edit.
-5. **Fill in `.env`** *(human — secrets)*: the shared keys from the team
-   vault (see "Credentials" below).
-6. **Authorize Drive:** `cn-pipeline drive auth` → open the printed URL,
-   consent as your own team account, paste the redirect URL back. *(human —
-   sign-in)*
+5. **Get the shared credentials** *(human — secrets)*. Fastest path: ask an
+   already-working operator for a bundle (`cn-pipeline team export`), then
+
+   ```
+   cn-pipeline team import --file <bundle> --dry-run   # see what it would change
+   cn-pipeline team import --file <bundle>
+   ```
+
+   That fills in every shared service-account key and the team's Frame.io
+   project settings in one step, so you don't re-run any browser sign-in.
+   Values you already have are kept, not clobbered. Or fill `.env` in by hand
+   from the vault — see "Credentials" below. Either way you still set
+   `drive_root` and `operator` yourself; nothing else is machine-specific.
+6. **Authorize Drive — gdrive storage mode only:** `cn-pipeline drive auth` →
+   open the printed URL, consent as your own team account, paste the redirect
+   URL back. *(human — sign-in)*. **Skip this in mount mode**: Drive for
+   Desktop is already signed in as you, and no Google token is used.
 7. **Confirm:** ask "what skills are available?" — `localize-chinese` should
    be listed.
 8. **Validate before the first real run:** dry-run against a project that's
-   already been localized (ask Wayne for the known-good baseline) and check
-   the output durations match the published files in its Drive `/CN/` folder.
-   `docs/VALIDATE.md` is the copy-paste runbook.
+   already been localized (ask an operator for the known-good baseline) and
+   check the output durations match the published files in its Drive `/CN/`
+   folder. `docs/VALIDATE.md` is the copy-paste runbook.
 
 </details>
 
 ### Credentials
 
-Everything secret lives in the **team password vault** (ask Wayne for access)
-and goes into the `.env` that `cn-pipeline-setup` creates — never into the
-repo, Slack, or email:
+Everything secret lives in the **team password vault** (ask an admin for
+access) and goes into the `.env` that `cn-pipeline-setup` creates — never into
+the repo, Slack, or email:
 
 | `.env` entry | What it is | Vault item |
 |---|---|---|
@@ -177,11 +189,26 @@ repo, Slack, or email:
 | `FRAMEIO_CLIENT_ID/SECRET` (+ share passphrase) | Frame.io review integration | shared team credential |
 | `YOUTUBE_CLIENT_ID/SECRET` | YouTube upload client | shared team credential |
 
-The three `*_REFRESH_TOKEN` entries are minted per machine by the one-time
-auth commands (`drive auth`, `review auth`, `publish auth`) — those aren't in
-the vault. Sign-in accounts differ on purpose: **Drive** = your own team
-account; **YouTube** = the Chinese channel account (`publish auth` tells
-you); **Frame.io** = the team's Adobe-linked reviewer account.
+Refresh tokens are minted by the one-time auth commands (`drive auth`,
+`review auth`, `publish auth`), and **two of the three are shareable** because
+they authenticate as shared accounts rather than as a person:
+
+| Token | Authenticates as | Shareable? |
+|---|---|---|
+| `FRAMEIO_REFRESH_TOKEN` | the team's dedicated Adobe-linked reviewer account | yes — travels in the bundle |
+| `YOUTUBE_REFRESH_TOKEN` | the Chinese channel account | yes — travels in the bundle |
+| `GDRIVE_REFRESH_TOKEN` | **your own** team account | no — and unused in mount mode |
+
+So one operator can run the auth flows once and hand the rest of the team a
+bundle. `cn-pipeline team export` builds it; put it in the vault next to the
+keys. Anyone can still run the auth commands themselves — import is a
+shortcut, not the only route, so nobody waits on anyone to re-auth one service.
+
+**Never copy the whole plugin data directory to another machine.** It contains
+`.machine_id`, the project claim lock's identity. Two machines sharing one id
+are *the same machine* to the lock: both take a claim re-entrantly and work the
+same video in silence, which is exactly the double-spend the lock exists to
+prevent. `team export` excludes it by design; a directory copy does not.
 
 ---
 
@@ -257,7 +284,7 @@ genuinely abandoned claim with `--steal` after checking with its holder.
   one passage re-buys only that passage.
 - **Paid calls are capped per run** (`max_*_calls_per_run` in `config.json`,
   counter in `runs/{id}/api_spend.json`). Hitting a cap is a
-  flag-it-to-Wayne moment, not a prompt to raise the cap.
+  flag-it-to-the-owner moment, not a prompt to raise the cap.
 - **Versioned deliverables.** A re-cut renders as `{id}_cndub_v2.mp4` next to
   v1, never over it. Publishing takes the highest version present, and the
   publish skill refuses to double-publish a row that already has a link.
@@ -299,4 +326,4 @@ auto-discovered. Run the tests with `python tests/test_<name>.py`.
 
 Check `runs/{project-id}/*.log` and `*_log.json` first. Don't blind-retry a
 paid stage — TTS and thumbnail cleaning cost real money per call. If the
-cause isn't obvious from the log, flag it to Wayne.
+cause isn't obvious from the log, flag it to the owner.
