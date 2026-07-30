@@ -83,7 +83,33 @@ def _code_from_redirect(redirect_or_code: str) -> str:
 def _token_post(data: dict) -> dict:
     resp = requests.post(GOOGLE_TOKEN_URL, data=data, timeout=30)
     if resp.status_code != 200:
-        raise ConfigError(f"Google token request failed ({resp.status_code}): {resp.text[:300]}")
+        msg = f"Google token request failed ({resp.status_code}): {resp.text[:300]}"
+        # invalid_grant on a refresh is almost always the test-mode expiry, not a
+        # mistake anyone made. Google kills refresh tokens for an OAuth app that
+        # is still in "Testing" after 7 days, whether or not they've been used --
+        # so re-authenticating buys another week and then breaks again. Without
+        # this text the next person re-auths, it works, and the real cause stays
+        # hidden until it recurs.
+        if data.get("grant_type") == "refresh_token" and "invalid_grant" in resp.text:
+            msg += (
+                "\n\nThe stored YOUTUBE_REFRESH_TOKEN has expired or been revoked.\n"
+                "\n"
+                "If the Google Cloud OAuth app is still in **Testing** mode, this is expected "
+                "and will recur every ~7 days no matter how recently you signed in -- Google "
+                "expires test-mode refresh tokens on a timer. Re-authenticating is a workaround, "
+                "not a fix.\n"
+                "\n"
+                "  Permanent fix (one-time, Google Cloud Console, needs an owner):\n"
+                "    APIs & Services -> OAuth consent screen -> PUBLISH APP\n"
+                "\n"
+                "  Until then: `cn-pipeline publish auth`, signed in as the Chinese channel's\n"
+                "  Google account -- NOT a personal one. Expect to repeat it weekly.\n"
+                "\n"
+                "  A token that works on another machine can be adopted instead:\n"
+                "    cn-pipeline team import --file <bundle> --overwrite\n"
+                "  though in test mode it will die on the same 7-day clock for everyone."
+            )
+        raise ConfigError(msg)
     return resp.json()
 
 
