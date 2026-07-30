@@ -275,10 +275,52 @@ def check_frameio() -> list[Check]:
         return [_c("frameio token", PASS, f"minted ok ({len(token)} chars)")]
     except Exception as e:
         msg = str(e)
-        hint = ("re-authenticate: `cn-pipeline review auth`"
-                if "access_denied" in msg or "refresh" in msg.lower() else
-                "only the `review` stage needs Frame.io; everything else can run")
+        if "access_denied" in msg or "refresh" in msg.lower():
+            # Frame.io is a SHARED account, so adopting a working token is the
+            # normal fix. Pointing at `review auth` first sends a teammate to
+            # mint a token against their own Adobe session -- which replaces the
+            # team's working one and walks them into the single-use-code trap.
+            hint = ("this is a SHARED account -- adopt a working token first: get a bundle "
+                    "from an operator whose doctor shows `minted ok`, then `cn-pipeline team "
+                    "import --file <bundle> --overwrite`. Only re-run `cn-pipeline review auth` "
+                    "if nobody has one, and sign in as the shared Frame.io account")
+        else:
+            hint = "only the `review` stage needs Frame.io; everything else can run"
         return [_c("frameio token", FAIL, msg.splitlines()[0][:200], hint)]
+
+
+def check_youtube() -> list[Check]:
+    """Mint a YouTube token too. Publishing was the one paid/irreversible stage
+    doctor couldn't see: a dead token stayed invisible until someone tried to
+    upload an approved cut, which is the worst moment to discover it."""
+    from cn_pipeline.config import get_config
+    cfg = get_config()
+    if not (cfg.youtube_client_id and cfg.youtube_client_secret):
+        return [_c("youtube token", WARN, "no YOUTUBE_CLIENT_ID/SECRET",
+                   "only the `publish` stage needs this; import a team bundle when you get there")]
+    if not cfg.youtube_refresh_token:
+        return [_c("youtube token", WARN, "no YOUTUBE_REFRESH_TOKEN",
+                   "run `cn-pipeline publish auth` as the Chinese channel's Google account, "
+                   "or adopt a working one with `cn-pipeline team import`")]
+    try:
+        from cn_pipeline import publish
+        token = publish._access_token(cfg)
+        return [_c("youtube token", PASS, f"minted ok ({len(token)} chars)")]
+    except Exception as e:
+        msg = str(e)
+        # WARN, not FAIL: this blocks `publish` only, and publishing is a
+        # separate later step a human runs. Failing every localization run over
+        # a credential that run doesn't touch is how people learn to ignore
+        # doctor -- and then miss the failures that do matter.
+        if "invalid_grant" in msg:
+            return [_c("youtube token", WARN,
+                       "invalid_grant -- expired or revoked (blocks `publish`, not localization)",
+                       "the OAuth app is published (2026-07-30), so one re-auth persists: "
+                       "`cn-pipeline publish auth` as the Chinese channel's Google account, then "
+                       "`cn-pipeline team export` so the team adopts the fresh token. This token "
+                       "probably predates the app's publication")]
+        return [_c("youtube token", WARN, msg.splitlines()[0][:200],
+                   "only the `publish` stage needs YouTube; localization can still run")]
 
 
 # --- per-project checks ------------------------------------------------------
@@ -456,6 +498,7 @@ def run(project_id: str | None = None) -> list[Check]:
     checks += el_checks
     checks += check_kie(cfg.kie_api_key)
     checks += check_frameio()
+    checks += check_youtube()
 
     if project_id:
         checks += check_project(project_id, el_remaining)

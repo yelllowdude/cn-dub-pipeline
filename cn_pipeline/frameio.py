@@ -246,11 +246,23 @@ def _ims_post(data: dict) -> dict:
         # invalidated. Nothing in the message says so, hence the hint.
         if data.get("grant_type") == "refresh_token" and "access_denied" in resp.text:
             msg += (
-                "\n\nThe stored FRAMEIO_REFRESH_TOKEN was rejected. This can happen even while "
-                "the token's own expiry is in the future, if the Adobe sign-in session it was "
-                "issued against has been invalidated. Re-authenticate with "
-                "`cn-pipeline review auth` and follow the sign-in link; it writes a fresh "
-                "token to .env."
+                "\n\nThe stored FRAMEIO_REFRESH_TOKEN was rejected. This happens even while the "
+                "token's own expiry is in the future, if the Adobe sign-in session it was issued "
+                "against has been invalidated.\n"
+                "\n"
+                "Frame.io authenticates as a SHARED team account, so the usual fix is to adopt a "
+                "working token rather than mint your own:\n"
+                "\n"
+                "  1. Ask an operator whose `cn-pipeline doctor` shows `frameio token  minted ok` "
+                "for a bundle (`cn-pipeline team export`), then:\n"
+                "         cn-pipeline team import --file <bundle> --overwrite\n"
+                "\n"
+                "  2. Only if NOBODY has a working token, sign in again with `cn-pipeline review "
+                "auth`. Do that as the shared Frame.io account, not your personal Adobe login -- "
+                "signing in as yourself replaces the team's token with one bound to your session.\n"
+                "     Note: the authorization code Adobe puts in the redirect URL expires in "
+                "about a minute and is single-use. Paste it immediately, and get a fresh one for "
+                "each attempt -- reusing a code fails with the same error as an expired one."
             )
         raise ConfigError(msg)
     return resp.json()

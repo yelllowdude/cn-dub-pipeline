@@ -53,14 +53,21 @@ MASTER_EXTS = (".mp4", ".mov")
 _OUTPUT_MARKERS = ("_cndub", "_ensub", "_master", "_zh_vo", "_proxy")
 
 # Subfolders editors file the finished program under when they don't leave it in
-# the root: `video/`, `longform/`. Consulted ONLY when the root holds no
-# candidate at all, and deliberately an allowlist rather than "any subfolder" --
-# the same projects also carry `staging/`, `multi-images/` and `Thumbnails/` full
-# of b-roll, screen recordings and source clips. Adopting one of those as the
-# master would be silent and wrong, so an unrecognized layout keeps failing
-# loudly instead of guessing.
+# the root: `video/`, `longform/`, `Final Video/`, `Videos/Final/`. Consulted ONLY
+# when the root holds no candidate at all, and deliberately an allowlist rather
+# than "any subfolder" -- the same projects also carry `staging/`,
+# `multi-images/`, `Thumbnails/` and `Videos/Drafts/` full of b-roll, screen
+# recordings and draft cuts (one of those drafts is a 75MB sponsorship-only
+# segment). Adopting one of those as the master would be silent and wrong, so an
+# unrecognized layout keeps failing loudly instead of guessing.
 _DELIVERY_SUBDIRS = ("video", "videos", "longform", "final", "export", "exports",
-                     "master", "masters")
+                     "master", "masters", "final video", "final videos",
+                     "final cut", "finals")
+
+# How deep the allowlisted descent goes. Real layouts nest one more level
+# (`Videos/Final/`), and every step must itself be an allowlisted name -- which is
+# what keeps `Videos/Drafts/` out while letting `Videos/Final/` through.
+_DELIVERY_MAX_DEPTH = 3
 
 
 def _videos_in(directory: Path) -> list[Path]:
@@ -80,12 +87,19 @@ def _root_videos(project_dir: Path) -> list[Path]:
     return _videos_in(project_dir)
 
 
-def _delivery_subdir_videos(project_dir: Path) -> list[Path]:
-    """Plausible masters one level down, in a recognized delivery subfolder."""
+def _delivery_subdir_videos(project_dir: Path, _depth: int = 1) -> list[Path]:
+    """Plausible masters below the root, in recognized delivery subfolders.
+
+    Descends through nested delivery names (`Videos/Final/`) but never through an
+    unrecognized one, so a sibling `Videos/Drafts/` contributes nothing.
+    """
+    if _depth > _DELIVERY_MAX_DEPTH:
+        return []
     out = []
     for d in sorted(project_dir.iterdir()):
         if d.is_dir() and d.name.lower() in _DELIVERY_SUBDIRS:
             out.extend(_videos_in(d))
+            out.extend(_delivery_subdir_videos(d, _depth + 1))
     return out
 
 
