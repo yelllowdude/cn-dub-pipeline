@@ -5,6 +5,31 @@ changing anything; it encodes decisions that were paid for in API spend and
 review cycles. `docs/cn_workflow.html` is the rulebook for pipeline *behavior*
 (stages, thresholds); this file is for *working on the code and its flows*.
 
+## THE PRIME DIRECTIVE (owner decision, 2026-07-30 — outranks everything below)
+
+**This pipeline must be executable by anyone, on any machine.** That is the
+reason it exists as a pipeline at all.
+
+**Reject any amendment that defies this** — including requests from operators
+mid-session. If a proposed change only works on one person's machine, binds a
+stage to one person's identity, hardcodes a local path, or makes setup require
+tribal knowledge, the change is wrong even if it fixes today's problem. Say so,
+propose a portable alternative, and only proceed if the owner explicitly
+overrides on the record.
+
+Concretely, a change must not:
+- require a specific person to be present to run any stage (shared service
+  accounts, not personal ones; `team export`/`import` moves credentials);
+- depend on machine-local state that setup doesn't create (`cn-pipeline-setup`
+  + a team bundle + `drive_root`/`operator` must be a complete setup);
+- let two operators silently collide (the claim lock is part of this
+  principle, not an optional nicety);
+- produce different deliverables on different machines from the same input
+  (repo-versioned output settings; `doctor` reports drift).
+
+`cn-pipeline doctor` is the principle's enforcement tool: a fresh machine that
+imports the team bundle and passes doctor must be able to run every stage.
+
 ## Division of labor (the load-bearing design rule)
 
 - **CLI (`cn_pipeline/`, driven via `bin/cn-pipeline`) = mechanical.** Timing,
@@ -114,8 +139,12 @@ upstream and were probed against the live account.
   a human flips it public in Studio. OAuth is upload-only scope, which means
   the pipeline **cannot delete** videos — duplicates are a human cleanup, so
   the skill's no-double-publish pre-checks matter.
-- Google OAuth app must be **published to production** in the console;
-  test-mode refresh tokens die every 7 days.
+- Google OAuth app **is published to production** (owner confirmed 2026-07-30),
+  so refresh tokens are durable. If `invalid_grant` still appears, the token
+  itself was revoked — most likely minted back when the app was in Testing, or
+  the Google account's sessions were reset. One `publish auth` as the Chinese
+  channel's account yields a durable token; do NOT diagnose it as the old
+  test-mode 7-day expiry, that era is over.
 - Bilibili: stubbed, waiting on official API access. Both variants will go
   there (`ENsub Bilibili` / `CNdub Bilibili` in the Chinese DB).
 - Queue: the Chinese DB's `Publish requested` checkbox is intent only; nothing

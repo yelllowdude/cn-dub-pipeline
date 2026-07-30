@@ -315,11 +315,10 @@ def check_youtube() -> list[Check]:
         if "invalid_grant" in msg:
             return [_c("youtube token", WARN,
                        "invalid_grant -- expired or revoked (blocks `publish`, not localization)",
-                       "if the Google OAuth app is still in Testing mode this recurs every ~7 "
-                       "days regardless of use, so re-authenticating only buys a week. Permanent "
-                       "fix, one-time, needs a Cloud project owner: Google Cloud Console -> APIs "
-                       "& Services -> OAuth consent screen -> PUBLISH APP. Stopgap: `cn-pipeline "
-                       "publish auth` as the Chinese channel's Google account")]
+                       "the OAuth app is published (2026-07-30), so one re-auth persists: "
+                       "`cn-pipeline publish auth` as the Chinese channel's Google account, then "
+                       "`cn-pipeline team export` so the team adopts the fresh token. This token "
+                       "probably predates the app's publication")]
         return [_c("youtube token", WARN, msg.splitlines()[0][:200],
                    "only the `publish` stage needs YouTube; localization can still run")]
 
