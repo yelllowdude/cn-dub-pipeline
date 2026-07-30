@@ -219,6 +219,47 @@ def test_ambiguous_subfolder_masters_raise_with_the_list():
             raise AssertionError("two non-conforming cuts must not be guessed between")
 
 
+def test_master_in_a_nested_delivery_subfolder_is_found():
+    """Real layout: `Videos/Final/P5_..._Final-4K.mp4` -- two levels down, and the
+    filename does not start with the project id either."""
+    with tempfile.TemporaryDirectory() as td:
+        d = _proj(td, "late-night_2025-05-22",
+                  ["Videos/Final/P5_late-night_2025-05-22_Final-4K.mp4"])
+        assert paths.find_master_video(d).name == "P5_late-night_2025-05-22_Final-4K.mp4"
+
+
+def test_a_drafts_sibling_is_not_descended_into():
+    """`Videos/Final/` is allowlisted at both levels; `Videos/Drafts/` is not, so
+    the draft (a sponsorship-only segment in the real project) never competes."""
+    with tempfile.TemporaryDirectory() as td:
+        d = _proj(td, "late-night_2025-05-22",
+                  ["Videos/Final/real_final_cut.mp4",
+                   "Videos/Drafts/late-night_2025-05-22_Draft1-SponsorshipVideoPart.mp4"])
+        assert paths.find_master_video(d).name == "real_final_cut.mp4"
+
+
+def test_delivery_subfolder_name_with_a_space_is_found():
+    """Real layout: `Final Video/{id}_4K.mp4`, alongside a `Staging/` folder."""
+    with tempfile.TemporaryDirectory() as td:
+        d = _proj(td, "your-legs_2025-05-25",
+                  ["Final Video/your-legs_2025-05-25_4K.mp4", "Staging/bts.mp4"])
+        assert paths.find_master_video(d).name == "your-legs_2025-05-25_4K.mp4"
+
+
+def test_descent_does_not_run_away():
+    """A deeply buried video is not adopted -- depth is bounded even when every
+    level happens to be an allowlisted name."""
+    with tempfile.TemporaryDirectory() as td:
+        d = _proj(td, "proj_2025-01-01",
+                  ["video/videos/final/exports/masters/buried.mp4"])
+        try:
+            paths.find_master_video(d)
+        except ProjectNotFoundError:
+            pass
+        else:
+            raise AssertionError("descent should be depth-bounded")
+
+
 def test_rendered_output_in_a_subfolder_is_excluded():
     with tempfile.TemporaryDirectory() as td:
         d = _proj(td, "proj_2025-01-01",
